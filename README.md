@@ -27,17 +27,17 @@ Every song file keeps its license (public domain or Creative Commons).
 1. Create a **public** GitHub repo, e.g. `piano-hub`.
 2. Push this folder to it:
    ```bash
-   git remote add origin https://github.com/<you>/piano-hub.git
+   git remote add origin https://github.com/trocktristan-hash/piano-hub.git
    git push -u origin main
    ```
 3. In `PianoHub.lua`, set `CONFIG.LibraryURL` to
-   `https://raw.githubusercontent.com/<you>/piano-hub/main/library/`, then commit and push again.
+   `https://raw.githubusercontent.com/trocktristan-hash/piano-hub/main/library/`, then commit and push again.
    (You can also paste the URL into the GUI under **Settings → Library URL**.)
 
 ## 2. Run it (Potassium or any executor)
 
 ```lua
-loadstring(game:HttpGet("https://raw.githubusercontent.com/<you>/piano-hub/main/PianoHub.lua"))()
+loadstring(game:HttpGet("https://raw.githubusercontent.com/trocktristan-hash/piano-hub/main/PianoHub.lua"))()
 ```
 
 Sit at the piano, choose a song, then click back into the game window during the countdown.

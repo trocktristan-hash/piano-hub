@@ -14,7 +14,7 @@
 ]]
 
 local CONFIG = {
-	LibraryURL = "https://raw.githubusercontent.com/YOUR_GITHUB_USER/piano-hub/main/library/",
+	LibraryURL = "https://raw.githubusercontent.com/trocktristan-hash/piano-hub/main/library/",
 	Folder = "PianoHub",
 	Version = "1.0.0",
 }
