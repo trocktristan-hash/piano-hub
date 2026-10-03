@@ -725,7 +725,8 @@ function Songs.encode(song)
 		flat[#flat + 1] = n[4]
 		prev = n[1]
 	end
-	return jencode({ v = 1, name = song.name, artist = song.artist, tracks = song.tracks, notes = flat })
+	return jencode({ v = 1, name = song.name, artist = song.artist, tracks = song.tracks, duration = song.duration,
+		count = song.count, nps = song.nps, notes = flat })
 end
 
 ---------------------------------------------------------------------------------------------------
@@ -883,11 +884,14 @@ function Lib.load()
 			end
 		end
 	end
-	-- local midi files
+	-- local midi files (ones already converted to songs/<name>.json are skipped)
+	Lib.pendingMidi = {}
 	for _, path in ipairs(FS.list(ROOT .. "/midi")) do
 		local lower = path:lower()
-		if lower:match("%.midi?$") then
-			local file = FS.basename(path)
+		local file = FS.basename(path)
+		local jsonFile = file:gsub("%.[Mm][Ii][Dd][Ii]?$", "") .. ".json"
+		if lower:match("%.midi?$") and not Lib.byId["local:" .. jsonFile] then
+			Lib.pendingMidi[#Lib.pendingMidi + 1] = { path = path, file = file, jsonFile = jsonFile }
 			Lib.add({
 				id = "midi:" .. file, name = file:gsub("%.[Mm][Ii][Dd][Ii]?$", ""):gsub("_", " "), artist = "Local MIDI",
 				tags = { "local", "midi" }, duration = 0, count = 0, nps = 0, source = "midi", path = path, added = os.time(),
@@ -906,6 +910,44 @@ function Lib.remember(id, song)
 	if #Lib.cacheOrder > 8 then
 		Lib.songCache[table.remove(Lib.cacheOrder, 1)] = nil
 	end
+end
+
+-- Turns every not-yet-converted MIDI in PianoHub/midi into PianoHub/songs/<name>.json, so the
+-- .mid files can be deleted afterwards. Runs in the background, one file per frame.
+function Lib.convertPending(onDone)
+	local pending = Lib.pendingMidi or {}
+	Lib.pendingMidi = {}
+	if #pending == 0 or not FS.ok then
+		return onDone and onDone(0, 0)
+	end
+	task.spawn(function()
+		local done, failed = 0, 0
+		for _, m in ipairs(pending) do
+			local entry = Lib.byId["midi:" .. m.file]
+			local ok, song = pcall(function()
+				return Songs.parseMidi(assert(FS.read(m.path), "cannot read file"), entry and entry.name or m.file)
+			end)
+			if ok then
+				local out = ROOT .. "/songs/" .. m.jsonFile
+				FS.write(out, Songs.encode(song))
+				if entry then -- switch the library entry over to the converted file
+					entry.source, entry.path = "local", out
+					entry.duration, entry.count, entry.nps = song.duration, song.count, song.nps
+					entry.tags = { "local" }
+					entry.artist = "Local"
+					entry.search = (entry.name .. " local"):lower()
+				end
+				done += 1
+			else
+				failed += 1
+				warn("[PianoHub] could not convert " .. m.file .. ": " .. tostring(song))
+			end
+			task.wait()
+		end
+		if onDone then
+			onDone(done, failed)
+		end
+	end)
 end
 
 -- async: callback(song) or callback(nil, err)
@@ -2578,14 +2620,11 @@ C.buttons(importPage, {
 })
 
 C.section(importPage, "Local files")
-C.note(importPage, ("Drop .mid files into  workspace/%s/midi/  or song .json files into  workspace/%s/songs/  (inside your executor's folder), then press Rescan.")
+C.note(importPage, ("Drop .mid files into  workspace/%s/midi/  (inside your executor's folder) and press Rescan. Each MIDI is converted once and saved to  workspace/%s/songs/  - after that you can delete the .mid files.")
 	:format(ROOT, ROOT))
 C.buttons(importPage, {
 	{ "Rescan local files", function()
-		Lib.load()
-		UI.renderChips()
-		UI.renderList()
-		UI.notify(("Library: %d songs"):format(#Lib.entries))
+		UI.reloadLibrary()
 	end },
 	{ "Export current song", function()
 		if Player.song then
@@ -2716,6 +2755,15 @@ function UI.reloadLibrary()
 		sideInfo.Text = ("%d songs\n%d online · %d local"):format(#Lib.entries, Lib.remoteCount, #Lib.entries - Lib.remoteCount)
 		UI.renderChips()
 		UI.renderList()
+		Lib.convertPending(function(done, failed)
+			if done > 0 then
+				UI.notify(("Converted %d MIDI file%s - saved in %s/songs. You can delete the .mid files now."):format(done, done == 1 and "" or "s", ROOT))
+				UI.renderList()
+			end
+			if failed > 0 then
+				UI.notify(("%d MIDI file%s could not be read (see console)"):format(failed, failed == 1 and "" or "s"), true)
+			end
+		end)
 		if Lib.status == "No library URL set" then
 			UI.notify("Set your library URL in Settings to load the full song library.", true)
 		elseif Lib.error then
