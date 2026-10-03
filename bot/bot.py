@@ -265,7 +265,10 @@ def split_tags(tags: str | None):
     return [t for t in (tags or "").replace(";", ",").split(",") if t.strip()]
 
 
-async def publish_midi(inter, data: bytes, filename: str, name, artist, tags):
+INSTRUMENTS = [app_commands.Choice(name="Piano", value="piano"), app_commands.Choice(name="Guitar", value="guitar")]
+
+
+async def publish_midi(inter, data: bytes, filename: str, name, artist, tags, instrument="piano"):
     try:
         parsed = await asyncio.to_thread(parse_midi, data)
     except (MidiError, Exception) as e:  # noqa: BLE001
@@ -274,7 +277,8 @@ async def publish_midi(inter, data: bytes, filename: str, name, artist, tags):
         return await inter.followup.send("❌ That MIDI has no playable notes.")
     name = (name or parsed.title or os.path.splitext(filename)[0].replace("_", " ")).strip()[:100]
     artist = (artist or "Unknown").strip()[:80]
-    song = make_song(parsed.notes, name, artist, split_tags(tags), tracks=parsed.track_names, bpm=parsed.bpm,
+    tag_list = split_tags(tags) + (["guitar"] if instrument == "guitar" else [])
+    song = make_song(parsed.notes, name, artist, tag_list, tracks=parsed.track_names, bpm=parsed.bpm, programs=parsed.track_programs,
                      added_by=str(inter.user), source="discord")
     if song["duration"] > MAX_SECONDS:
         return await inter.followup.send(f"❌ Too long ({fmt_time(song['duration'])}). Limit is {fmt_time(MAX_SECONDS)}.")
@@ -284,22 +288,25 @@ async def publish_midi(inter, data: bytes, filename: str, name, artist, tags):
 
 
 @tree.command(description="Add a MIDI file to the PianoHub library")
-@app_commands.describe(file=".mid file", name="Song name", artist="Artist / composer", tags="Comma separated, e.g. anime,pop")
+@app_commands.describe(file=".mid file", name="Song name", artist="Artist / composer", tags="Comma separated, e.g. anime,pop",
+                       instrument="Guitar songs show up in PianoHub's Guitar tab")
+@app_commands.choices(instrument=INSTRUMENTS)
 @editors_only()
 async def addsong(inter: discord.Interaction, file: discord.Attachment, name: str | None = None,
-                  artist: str | None = None, tags: str | None = None):
+                  artist: str | None = None, tags: str | None = None, instrument: str = "piano"):
     if not file.filename.lower().endswith((".mid", ".midi")):
         return await inter.response.send_message("❌ Attach a `.mid` file.", ephemeral=True)
     if file.size > MAX_MIDI_BYTES:
         return await inter.response.send_message("❌ File is too big.", ephemeral=True)
     await inter.response.defer(thinking=True)
-    await publish_midi(inter, await file.read(), file.filename, name, artist, tags)
+    await publish_midi(inter, await file.read(), file.filename, name, artist, tags, instrument)
 
 
 @tree.command(description="Add a MIDI from a direct download link")
+@app_commands.choices(instrument=INSTRUMENTS)
 @editors_only()
 async def addurl(inter: discord.Interaction, url: str, name: str | None = None, artist: str | None = None,
-                 tags: str | None = None):
+                 tags: str | None = None, instrument: str = "piano"):
     if not url.startswith(("http://", "https://")):
         return await inter.response.send_message("❌ That's not a link.", ephemeral=True)
     await inter.response.defer(thinking=True)
@@ -312,7 +319,7 @@ async def addurl(inter: discord.Interaction, url: str, name: str | None = None, 
         return await inter.followup.send(f"❌ Download failed: `{e}`")
     if len(data) > MAX_MIDI_BYTES:
         return await inter.followup.send("❌ File is too big.")
-    await publish_midi(inter, data, url.rsplit("/", 1)[-1].split("?")[0], name, artist, tags)
+    await publish_midi(inter, data, url.rsplit("/", 1)[-1].split("?")[0], name, artist, tags, instrument)
 
 
 @tree.command(description="Add a Virtual Piano letter sheet, e.g. [tu] y t | ...")

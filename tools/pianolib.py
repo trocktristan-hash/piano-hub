@@ -41,6 +41,7 @@ class MidiError(ValueError):
 class ParsedMidi:
     notes: list = field(default_factory=list)   # [start_ms, pitch, dur_ms, track]
     track_names: list = field(default_factory=list)
+    track_programs: list = field(default_factory=list)  # General MIDI program per track (24-31 = guitars)
     title: str | None = None
     bpm: float = 120.0
 
@@ -75,6 +76,7 @@ def parse_midi(data: bytes) -> ParsedMidi:
 
     tempos = [(0, 500000)]
     raw = []      # (tick, order, track, channel, pitch, on, velocity)
+    programs = {}  # (track, channel) -> first program change
     pedals = []   # (tick, channel, down)
     track_names = []
     order = 0
@@ -133,7 +135,11 @@ def parse_midi(data: bytes) -> ParsedMidi:
                         pedals.append((tick, ch, val >= 64))
                 elif hi in (0xA0, 0xE0):
                     pos += 2
-                elif hi in (0xC0, 0xD0):
+                elif hi == 0xC0:
+                    programs.setdefault((tr, ch), data[pos])
+                    programs.setdefault((-1, ch), data[pos])  # format 0 / channel-wide
+                    pos += 1
+                elif hi == 0xD0:
                     pos += 1
                 else:
                     pos += 1
@@ -191,23 +197,24 @@ def parse_midi(data: bytes) -> ParsedMidi:
                 st, c = stack.pop(0)
                 s_ms = to_ms(st)
                 e_ms = pedal_extend(c, to_ms(tick))
-                notes.append([s_ms, pitch, max(e_ms - s_ms, 20.0), tr])
+                notes.append([s_ms, pitch, max(e_ms - s_ms, 20.0), (tr, c)])
     last_ms = max((to_ms(r[0]) for r in raw), default=0.0)
     for (tr, ch, pitch), stack in open_notes.items():
         for st, c in stack:
             s_ms = to_ms(st)
-            notes.append([s_ms, pitch, max(min(last_ms - s_ms, 2000.0), 100.0), tr])
+            notes.append([s_ms, pitch, max(min(last_ms - s_ms, 2000.0), 100.0), (tr, c)])
 
     # remap used tracks to 0..n-1
     used = sorted({n[3] for n in notes})
     remap = {t: i for i, t in enumerate(used)}
-    names = [track_names[t] if t < len(track_names) else "" for t in used]
+    names = [track_names[t] if t < len(track_names) else "" for t, _c in used]
+    progs = [programs.get((t, c), programs.get((-1, c), 0)) for t, c in used]
     for n in notes:
         n[3] = remap[n[3]]
 
     notes = normalize_notes(notes)
     title = next((n for n in track_names if n and not re.match(r"^(track|piano|untitled)", n, re.I)), None)
-    return ParsedMidi(notes=notes, track_names=names, title=title,
+    return ParsedMidi(notes=notes, track_names=names, track_programs=progs, title=title,
                       bpm=round(60_000_000 / tempos[min(1, len(tempos) - 1)][1], 2))
 
 
@@ -286,7 +293,7 @@ def song_stats(notes):
 
 
 def make_song(notes, name, artist="Unknown", tags=None, song_id=None, tracks=None,
-              bpm=None, source=None, license_=None, added_by=None):
+              bpm=None, source=None, license_=None, added_by=None, programs=None):
     """Build the compact song dict. Notes are flattened as
     [delta_start_ms, pitch, dur_ms, track, ...] to keep files small."""
     flat, prev = [], 0
@@ -299,13 +306,17 @@ def make_song(notes, name, artist="Unknown", tags=None, song_id=None, tracks=Non
         "id": song_id or slugify(f"{artist}-{name}" if artist and artist != "Unknown" else name),
         "name": name,
         "artist": artist or "Unknown",
-        "tags": sorted({t.strip().lower() for t in (tags or []) if t.strip()}),
+        "tags": sorted({t.strip().lower() for t in (tags or []) if t.strip()} | auto_tags(name, artist, nps)),
         "duration": duration,
         "count": count,
         "nps": nps,
         "tracks": tracks or [],
         "notes": flat,
     }
+    if programs:
+        song["programs"] = list(programs)
+        if any(24 <= p <= 31 for p in programs) and all(24 <= p <= 39 for p in programs):
+            song["tags"] = sorted(set(song["tags"]) | {"guitar"})  # guitar (+ bass) only
     if bpm:
         song["bpm"] = bpm
     if source:
@@ -409,3 +420,40 @@ class Library:
     def save(self):
         with open(self.index_path, "w", encoding="utf-8") as f:
             f.write(self.index_json())
+
+
+# --------------------------------------------------------------------------- auto tags
+
+FAMOUS = [
+    "fur elise", "für elise", "moonlight", "pathetique", "pathétique", "appassionata", "ode to joy", "clair de lune",
+    "gymnop", "gnossienne", "canon in d", "rondo alla turca", "turkish march", "alla turca", "the entertainer",
+    "maple leaf rag", "mountain king", "minute waltz", "valse op. 64 no. 1", "nocturne op. 9 no. 2", "nocturne in e-flat major, op. 9",
+    "fantaisie-impromptu", "fantasie impromptu", "revolutionary", "raindrop", "heroic", "héroïque", "polonaise in a-flat major, op. 53",
+    "ballade no. 1", "liebestraum", "la campanella", "hungarian rhapsody no. 2", "consolation", "träumerei", "traumerei",
+    "kinderszenen", "prelude in c major, bwv 846", "well-tempered", "goldberg", "toccata and fugue", "jesu, joy",
+    "arabesque", "reverie", "rêverie", "golliwogg", "sonata no. 14", "sonata in c major, k. 545", "k. 545", "k. 331",
+    "the swan", "swan lake", "nutcracker", "sugar plum", "waltz of the flowers", "flight of the bumblebee",
+    "prelude in c-sharp minor", "pictures at an exhibition", "great gate", "lullaby", "wiegenlied", "air on the g",
+    "greensleeves", "jingle bells", "silent night", "spring song", "wedding march", "habanera", "carmen",
+    "blue danube", "radetzky", "william tell", "can-can", "hallelujah", "minuet in g", "musette",
+]
+CRAZY = [
+    "campanella", "hungarian rhapsody", "mephisto", "islamey", "feux follets", "transcendental", "wilde jagd",
+    "revolutionary", "winter wind", "op. 25 no. 11", "op. 10 no. 4", "op. 10 no. 1", "op. 10 no. 12",
+    "flight of the bumblebee", "erlkönig", "erlkonig", "don juan", "rigoletto", "totentanz", "paganini",
+    "tarantella", "toccata", "etude-tableau", "étude-tableau", "etudes-tableaux", "études-tableaux",
+    "gnomenreigen", "spanish rhapsody", "rhapsodie espagnole", "scherzo no. 2", "polonaise in a-flat major, op. 53",
+    "ballade no. 4", "sonata in b minor", "carmen", "blue danube", "réminiscences", "reminiscences", "fantasia on",
+    "la valse", "petrushka", "rush", "black midi", "impossible",
+]
+CRAZY_NPS = 11.0  # anything denser than this sounds "crazy" on a Roblox piano
+
+
+def auto_tags(name: str, artist: str = "", nps: float = 0.0):
+    text = f"{name} {artist}".lower()
+    tags = set()
+    if any(k in text for k in FAMOUS):
+        tags.add("famous")
+    if nps >= CRAZY_NPS or any(k in text for k in CRAZY):
+        tags.add("crazy")
+    return tags

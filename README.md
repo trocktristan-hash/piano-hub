@@ -16,7 +16,7 @@ piano-hub/
 └─ bot/                  Discord bot: /addsong etc. commits straight to the repo
 ```
 
-The bundled library has **388 solo piano pieces** (Beethoven, Chopin, Bach, Debussy, Satie,
+The bundled library has **388 solo piano pieces** and **336 classical guitar pieces** (Beethoven, Chopin, Bach, Debussy, Satie,
 Joplin, Mozart, Schumann, Grieg …) taken from the [Mutopia Project](https://www.mutopiaproject.org).
 Every song file keeps its license (public domain or Creative Commons).
 
@@ -64,6 +64,29 @@ Sit at the piano, choose a song, then click back into the game window during the
 folder and press **Rescan**. They're parsed in-game by the built-in Lua MIDI reader.
 Settings, favorites and downloaded songs are saved in `workspace/PianoHub/`.
 
+## 🎸 Guitar mode
+
+The **Guitar** tab switches PianoHub to Roblox guitars with the 6-string keyboard layout
+(each key row is a string, low E = `z x c v …`, A = `a s d …`, D = `q w e …`, G = `` ` 1 2 … ``,
+B = `Q W E …`, high e = `~ ! @ …`; every key to the right is one fret higher, frets 0–12).
+
+- Every note gets a real string + fret: chords never put two notes on one string, the fretting hand
+  stays within a reachable stretch (adjustable), and melodies stay near the current hand position.
+- Strummed chords (alternating down/up strokes), optional vibrato (holds Ctrl on long notes) and
+  palm muting (holds Space on short low notes). Tunings: Standard, Drop D, Half/Full step down,
+  Drop C, Open G, Open D, DADGAD — match the game's TUNING button. Keep the game's CAPS (octave) off.
+- **Guitar tracks only** mutes vocals/bass/piano parts when a MIDI has a guitar track (General MIDI
+  programs 24–31 or a track named "guitar").
+- Songs tagged `guitar` switch the instrument automatically. The library ships with **336 public-domain
+  classical guitar pieces** (Tárrega, Sor, Giuliani, Carcassi, Aguado, …).
+
+**Getting more guitar songs**
+1. Drop `.mid` files into `workspace/PianoHub/guitar/` and press **Rescan** (converted once, then the `.mid` can be deleted).
+2. **MuseScore:** open a score in the free MuseScore Studio app → *File → Export → MIDI*. Solo / fingerstyle arrangements work best.
+3. **Guitar Pro tabs** (`.gp`, `.gp5`, `.gpx` from Ultimate Guitar, GProTab, …): open in the free **TuxGuitar** or MuseScore Studio and export MIDI.
+4. Share with everyone: Discord `/addsong` with `instrument: Guitar`.
+5. Refresh the bundled set: `python tools/build_library.py --instrument guitar --limit 800`.
+
 ## 3. Discord bot
 
 1. Go to <https://discord.com/developers/applications> → New Application → **Bot** → Reset Token.
@@ -79,7 +102,7 @@ Settings, favorites and downloaded songs are saved in `workspace/PianoHub/`.
 
 | Command | Who | |
 |---|---|---|
-| `/addsong file:<.mid> [name] [artist] [tags]` | editors | Converts the MIDI and commits it to the library |
+| `/addsong file:<.mid> [name] [artist] [tags] [instrument]` | editors | Converts the MIDI and commits it to the library (`instrument: Guitar` puts it in the Guitar tab) |
 | `/addurl url [name] [artist] [tags]` | editors | Same, from a direct `.mid` link |
 | `/addsheet name sheet\|file [bpm]` | editors | Virtual Piano letter sheet |
 | `/editsong song [name] [artist] [tags]` | editors | Rename or retag (autocomplete) |

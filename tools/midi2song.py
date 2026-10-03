@@ -38,7 +38,7 @@ def cmd_add(a):
             continue
         base = os.path.splitext(os.path.basename(path))[0].replace("_", " ")
         name = a.name or base
-        song = make_song(parsed.notes, name, a.artist, tags, tracks=parsed.track_names,
+        song = make_song(parsed.notes, name, a.artist, tags, tracks=parsed.track_names, programs=parsed.track_programs,
                          bpm=parsed.bpm, added_by=a.by,
                          song_id=a.id or slugify(f"{a.artist}-{name}" if a.artist != "Unknown" else name))
         e = lib.add(song, replace=a.replace)

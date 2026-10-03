@@ -110,7 +110,7 @@ function FS.basename(p)
 end
 
 local ROOT = CONFIG.Folder
-for _, d in ipairs({ ROOT, ROOT .. "/cache", ROOT .. "/songs", ROOT .. "/midi" }) do
+for _, d in ipairs({ ROOT, ROOT .. "/cache", ROOT .. "/songs", ROOT .. "/midi", ROOT .. "/guitar" }) do
 	FS.mkdir(d)
 end
 
@@ -186,6 +186,8 @@ local S = {
 		Hesitate = "F5", Flourish = "F6", Ending = "F7", Live = "F8", Warmup = "" },
 	Improv = { Enabled = false, Amount = 35, Ornaments = true, Fills = true, Octaves = true, Arpeggios = true, Intro = false, Ending = true },
 	Transition = "Random",
+	Instrument = "Piano", -- Piano | Guitar
+	Guitar = { Tuning = "Standard", TracksOnly = true, Strum = true, StrumMs = 14, Stretch = 4, Vibrato = false, PalmMute = false, AutoSwitch = true },
 	WarmupPlay = true,
 	LiveAuto = true,
 	Human = {
@@ -258,7 +260,19 @@ local DIGITS = { ["1"] = "One", ["2"] = "Two", ["3"] = "Three", ["4"] = "Four", 
 local SYMBOLS = { ["!"] = "One", ["@"] = "Two", ["#"] = "Three", ["$"] = "Four", ["%"] = "Five",
 	["^"] = "Six", ["&"] = "Seven", ["*"] = "Eight", ["("] = "Nine", [")"] = "Zero" }
 
+local PUNCT = { -- char -> KeyCode name, needs shift
+	["`"] = { "Backquote", false }, ["~"] = { "Backquote", true }, ["-"] = { "Minus", false }, ["_"] = { "Minus", true },
+	["="] = { "Equals", false }, ["+"] = { "Equals", true }, ["["] = { "LeftBracket", false }, ["{"] = { "LeftBracket", true },
+	["]"] = { "RightBracket", false }, ["}"] = { "RightBracket", true }, ["\\"] = { "BackSlash", false }, ["|"] = { "BackSlash", true },
+	[";"] = { "Semicolon", false }, [":"] = { "Semicolon", true }, ["'"] = { "Quote", false }, ['"'] = { "Quote", true },
+	[","] = { "Comma", false }, ["<"] = { "Comma", true }, ["."] = { "Period", false }, [">"] = { "Period", true },
+	["/"] = { "Slash", false }, ["?"] = { "Slash", true },
+}
+
 local function charKey(c)
+	if PUNCT[c] then
+		return { code = Enum.KeyCode[PUNCT[c][1]], shift = PUNCT[c][2], char = c }
+	end
 	if DIGITS[c] then
 		return { code = Enum.KeyCode[DIGITS[c]], shift = false, char = c }
 	elseif SYMBOLS[c] then
@@ -268,6 +282,7 @@ local function charKey(c)
 end
 
 local KEYS, EXT_KEYS, CHAR_TO_MIDI = {}, {}, {}
+local Guitar = {} -- filled in after the key output section
 for i = 1, #VP_KEYS do
 	local c = VP_KEYS:sub(i, i)
 	KEYS[VP_LOW + i - 1] = charKey(c)
@@ -290,6 +305,9 @@ end
 
 -- pitch (already transposed) -> playable pitch, key   (nil when dropped)
 local function resolvePitch(p)
+	if S.Instrument == "Guitar" then
+		return Guitar.resolve(p)
+	end
 	if p >= VP_LOW and p <= VP_HIGH then
 		return p, KEYS[p]
 	end
@@ -367,7 +385,279 @@ function Keys.releaseAll()
 	Keys.releases = {}
 	send(false, SHIFT)
 	send(false, CTRL)
+	Guitar.release()
 end
+
+---------------------------------------------------------------------------------------------------
+-- guitar: 6 strings x 13 frets (0-12). Each keyboard row is one string, each key to the right +1 fret.
+---------------------------------------------------------------------------------------------------
+Guitar.ROWS = { -- low E .. high e
+	"zxcvbnm,./<>?",
+	"asdfghjkl;':\"",
+	"qwertyuiop[]\\",
+	"`1234567890-=",
+	"QWERTYUIOP{}|",
+	"~!@#$%^&*()_+",
+}
+Guitar.FRETS = 12
+Guitar.TUNINGS = {
+	["Standard"] = { 40, 45, 50, 55, 59, 64 },
+	["Drop D"] = { 38, 45, 50, 55, 59, 64 },
+	["Half step down"] = { 39, 44, 49, 54, 58, 63 },
+	["Full step down"] = { 38, 43, 48, 53, 57, 62 },
+	["Drop C"] = { 36, 43, 48, 53, 57, 62 },
+	["Open G"] = { 38, 43, 50, 55, 59, 62 },
+	["Open D"] = { 38, 45, 50, 54, 57, 62 },
+	["DADGAD"] = { 38, 45, 50, 55, 57, 62 },
+}
+Guitar.TUNING_ORDER = { "Standard", "Drop D", "Half step down", "Full step down", "Drop C", "Open G", "Open D", "DADGAD" }
+Guitar.keys = {}
+Guitar.hand = 3
+Guitar.vibUntil, Guitar.muteUntil = 0, 0
+Guitar.vibDown, Guitar.muteDown = false, false
+
+function Guitar.active()
+	return S.Instrument == "Guitar"
+end
+
+function Guitar.tuning()
+	return Guitar.TUNINGS[S.Guitar.Tuning] or Guitar.TUNINGS.Standard
+end
+
+function Guitar.range()
+	local t = Guitar.tuning()
+	return t[1], t[6] + Guitar.FRETS
+end
+
+function Guitar.key(s, f)
+	local row = Guitar.keys[s]
+	if not row then
+		row = {}
+		Guitar.keys[s] = row
+	end
+	if not row[f] then
+		local k = charKey(Guitar.ROWS[s]:sub(f + 1, f + 1))
+		k.string, k.fret = s, f
+		row[f] = k
+	end
+	return row[f]
+end
+
+-- best single position for a pitch near where the hand currently is
+function Guitar.place(p)
+	local t = Guitar.tuning()
+	local bestS, bestF, bestCost = nil, nil, math.huge
+	for s = 1, 6 do
+		local f = p - t[s]
+		if f >= 0 and f <= Guitar.FRETS then
+			local cost = (f == 0) and 0.5 or math.abs(f - Guitar.hand)
+			if cost < bestCost then
+				bestS, bestF, bestCost = s, f, cost
+			end
+		end
+	end
+	return bestS, bestF
+end
+
+-- resolvePitch() for guitar mode
+function Guitar.resolve(p)
+	local lo, hi = Guitar.range()
+	if p < lo or p > hi then
+		if S.RangeMode == "Drop" then
+			return nil
+		end
+		while p < lo do
+			p += 12
+		end
+		while p > hi do
+			p -= 12
+		end
+	end
+	local s, f = Guitar.place(p)
+	if not s then
+		return nil
+	end
+	return p, Guitar.key(s, f)
+end
+
+-- strings for a chord (notes sorted low -> high): strictly rising strings, frets 0..12,
+-- fretted notes within `stretch` frets of each other, as close to the hand as possible
+function Guitar.voice(notes, tun, hand, stretch)
+	local n = #notes
+	if n > 6 then
+		return nil
+	end
+	local best, bestCost = nil, math.huge
+	local pick = {}
+	local function rec(k, minS)
+		if k > n then
+			local lo, hi, cost = 99, -1, 0
+			for i = 1, n do
+				local f = pick[i][2]
+				if f > 0 then
+					lo = math.min(lo, f)
+					hi = math.max(hi, f)
+					cost += math.abs(f - hand)
+				else
+					cost += 0.5
+				end
+			end
+			if hi >= 0 and hi - lo > stretch then
+				return
+			end
+			if cost < bestCost then
+				bestCost = cost
+				best = {}
+				for i = 1, n do
+					best[i] = { pick[i][1], pick[i][2] }
+				end
+			end
+			return
+		end
+		for s = minS, 6 - (n - k) do
+			local f = notes[k].p - tun[s]
+			if f >= 0 and f <= Guitar.FRETS then
+				pick[k] = { s, f }
+				rec(k + 1, s + 1)
+			end
+		end
+	end
+	rec(1, 1)
+	return best
+end
+
+-- give every event a string + fret, keep chords playable, strum them
+function Guitar.assign(out)
+	local G = S.Guitar
+	local tun = Guitar.tuning()
+	table.sort(out, function(a, b)
+		return a.t < b.t
+	end)
+	local groups = {}
+	for _, e in ipairs(out) do
+		local g = groups[#groups]
+		if g and e.t - g.t <= 30 then
+			table.insert(g.notes, e)
+		else
+			groups[#groups + 1] = { t = e.t, notes = { e } }
+		end
+	end
+	local res = {}
+	local hand = 3
+	local down, lastChordT = true, -1e9
+	for _, g in ipairs(groups) do
+		table.sort(g.notes, function(a, b)
+			return a.p < b.p
+		end)
+		local notes, seen = {}, {}
+		for _, e in ipairs(g.notes) do
+			if not seen[e.p] then
+				seen[e.p] = true
+				notes[#notes + 1] = e
+			end
+		end
+		while #notes > 6 do
+			table.remove(notes, #notes - 1)
+		end
+		local best
+		while #notes > 0 do
+			best = Guitar.voice(notes, tun, hand, G.Stretch)
+			if best then
+				break
+			end
+			if #notes > 2 then
+				table.remove(notes, #notes - 1) -- drop an inner voice, keep melody + bass
+			else
+				table.remove(notes, 1)
+			end
+		end
+		if best then
+			local sum, cnt = 0, 0
+			for k, e in ipairs(notes) do
+				local s, f = best[k][1], best[k][2]
+				e.key, e.p = Guitar.key(s, f), tun[s] + f
+				if f > 0 then
+					sum += f
+					cnt += 1
+				end
+				res[#res + 1] = e
+			end
+			if cnt > 0 then
+				hand = hand * 0.4 + (sum / cnt) * 0.6
+			end
+			if G.Strum and #notes >= 3 then
+				if g.t - lastChordT > 700 then
+					down = true -- a new phrase starts with a downstroke
+				end
+				for k, e in ipairs(notes) do
+					local rank = down and (k - 1) or (#notes - k)
+					e.t = g.t + rank * G.StrumMs
+				end
+				down = not down
+				lastChordT = g.t
+			end
+		end
+	end
+	Guitar.hand = hand
+	return res
+end
+
+-- mute everything that isn't a guitar track (when the MIDI has any)
+function Guitar.autoMute(song)
+	local progs, names = song.programs or {}, song.tracks or {}
+	local isGuitar, any = {}, false
+	for t = 0, (song.trackCount or 1) - 1 do
+		local prog = progs[t + 1]
+		local name = (names[t + 1] or ""):lower()
+		local g = (prog and prog >= 24 and prog <= 31) or name:find("guit") ~= nil or name:find("gtr") ~= nil
+		isGuitar[t] = g
+		any = any or g
+	end
+	local muted = {}
+	if any then
+		for t, g in pairs(isGuitar) do
+			if not g then
+				muted[t] = true
+			end
+		end
+	end
+	return muted
+end
+
+-- techniques: hold Ctrl for vibrato on long notes, Space to palm-mute short low notes
+function Guitar.technique(e, now)
+	local G = S.Guitar
+	local len = e.d / 1000 / math.max(S.Speed, 0.05)
+	local k = e.key
+	if G.Vibrato and e.d >= 650 then
+		Guitar.vibUntil = math.max(Guitar.vibUntil, now + len)
+	end
+	if G.PalmMute and k.string and k.string <= 3 and e.d <= 200 then
+		Guitar.muteUntil = math.max(Guitar.muteUntil, now + len + 0.04)
+	end
+end
+
+function Guitar.update(now)
+	local wantV = now < Guitar.vibUntil
+	if wantV ~= Guitar.vibDown then
+		Guitar.vibDown = wantV
+		send(wantV, CTRL)
+	end
+	local wantM = now < Guitar.muteUntil
+	if wantM ~= Guitar.muteDown then
+		Guitar.muteDown = wantM
+		send(wantM, Enum.KeyCode.Space)
+	end
+end
+
+function Guitar.release()
+	Guitar.vibUntil, Guitar.muteUntil = 0, 0
+	if Guitar.muteDown then
+		send(false, Enum.KeyCode.Space)
+	end
+	Guitar.vibDown, Guitar.muteDown = false, false
+end
+
 
 ---------------------------------------------------------------------------------------------------
 -- song formats: library json, MIDI (binary), Virtual Piano sheets
@@ -441,6 +731,8 @@ function Songs.fromData(data, entry)
 		name = data.name or (entry and entry.name) or "Untitled",
 		artist = data.artist or (entry and entry.artist) or "Unknown",
 		tracks = data.tracks,
+		programs = data.programs,
+		tags = data.tags,
 		notes = notes,
 	})
 end
@@ -496,7 +788,7 @@ function Songs.parseMidi(data, name)
 	end
 
 	local tempos = { { 0, 500000 } }
-	local raw, pedals, names = {}, {}, {}
+	local raw, pedals, names, programs = {}, {}, {}, {}
 	local order = 0
 	for tr = 1, ntracks do
 		local cs = data:find("MTrk", pos, true)
@@ -552,6 +844,11 @@ function Songs.parseMidi(data, name)
 					end
 				elseif hi == 0xA0 or hi == 0xE0 then
 					pos += 2
+				elseif hi == 0xC0 then
+					local prog = u8()
+					local id = tr * 32 + ch
+					programs[id] = programs[id] or prog
+					programs[-1 - ch] = programs[-1 - ch] or prog
 				else
 					pos += 1
 				end
@@ -625,14 +922,16 @@ function Songs.parseMidi(data, name)
 		elseif open[key] and #open[key] > 0 then
 			local st = table.remove(open[key], 1)
 			local s = toMs(st)
-			notes[#notes + 1] = { s, r[5], math.max(pedalEnd(r[4], toMs(r[1])) - s, 20), r[3] }
-			usedTracks[r[3]] = true
+			local id = r[3] * 32 + r[4]
+			notes[#notes + 1] = { s, r[5], math.max(pedalEnd(r[4], toMs(r[1])) - s, 20), id }
+			usedTracks[id] = true
 		end
 	end
 	for key, starts in pairs(open) do
 		for _, st in ipairs(starts) do
-			notes[#notes + 1] = { toMs(st), key % 128, 400, math.floor(key / 4096) }
-			usedTracks[math.floor(key / 4096)] = true
+			local id = math.floor(key / 128) -- track * 32 + channel
+			notes[#notes + 1] = { toMs(st), key % 128, 400, id }
+			usedTracks[id] = true
 		end
 	end
 	if #notes == 0 then
@@ -643,10 +942,11 @@ function Songs.parseMidi(data, name)
 		trackList[#trackList + 1] = t
 	end
 	table.sort(trackList)
-	local remap, trackNames = {}, {}
+	local remap, trackNames, trackProgs = {}, {}, {}
 	for i, t in ipairs(trackList) do
 		remap[t] = i - 1
-		trackNames[i] = names[t] or ""
+		trackNames[i] = names[math.floor(t / 32)] or ""
+		trackProgs[i] = programs[t] or programs[-1 - t % 32] or 0
 	end
 	for _, n in ipairs(notes) do
 		n[4] = remap[n[4]]
@@ -656,6 +956,7 @@ function Songs.parseMidi(data, name)
 		name = name or "MIDI song",
 		artist = "Local MIDI",
 		tracks = trackNames,
+		programs = trackProgs,
 		notes = Songs.normalize(notes),
 	})
 end
@@ -736,8 +1037,8 @@ function Songs.encode(song)
 		flat[#flat + 1] = n[4]
 		prev = n[1]
 	end
-	return jencode({ v = 1, name = song.name, artist = song.artist, tracks = song.tracks, duration = song.duration,
-		count = song.count, nps = song.nps, notes = flat })
+	return jencode({ v = 1, name = song.name, artist = song.artist, tracks = song.tracks, programs = song.programs,
+		tags = song.tags, duration = song.duration, count = song.count, nps = song.nps, notes = flat })
 end
 
 ---------------------------------------------------------------------------------------------------
@@ -889,7 +1190,7 @@ function Lib.load()
 				local file = FS.basename(path)
 				Lib.add({
 					id = "local:" .. file, name = data.name or file, artist = data.artist or "Local",
-					tags = { "local" }, duration = data.duration or 0, count = data.count or 0, nps = data.nps or 0,
+					tags = (type(data.tags) == "table" and #data.tags > 0) and data.tags or { "local" }, duration = data.duration or 0, count = data.count or 0, nps = data.nps or 0,
 					source = "local", path = path, added = os.time(),
 				})
 			end
@@ -897,16 +1198,19 @@ function Lib.load()
 	end
 	-- local midi files (ones already converted to songs/<name>.json are skipped)
 	Lib.pendingMidi = {}
-	for _, path in ipairs(FS.list(ROOT .. "/midi")) do
-		local lower = path:lower()
-		local file = FS.basename(path)
-		local jsonFile = file:gsub("%.[Mm][Ii][Dd][Ii]?$", "") .. ".json"
-		if lower:match("%.midi?$") and not Lib.byId["local:" .. jsonFile] then
-			Lib.pendingMidi[#Lib.pendingMidi + 1] = { path = path, file = file, jsonFile = jsonFile }
-			Lib.add({
-				id = "midi:" .. file, name = file:gsub("%.[Mm][Ii][Dd][Ii]?$", ""):gsub("_", " "), artist = "Local MIDI",
-				tags = { "local", "midi" }, duration = 0, count = 0, nps = 0, source = "midi", path = path, added = os.time(),
-			})
+	for _, folder in ipairs({ "midi", "guitar" }) do
+		for _, path in ipairs(FS.list(ROOT .. "/" .. folder)) do
+			local lower = path:lower()
+			local file = FS.basename(path)
+			local jsonFile = (folder == "guitar" and "guitar_" or "") .. file:gsub("%.[Mm][Ii][Dd][Ii]?$", "") .. ".json"
+			if lower:match("%.midi?$") and not Lib.byId["local:" .. jsonFile] then
+				Lib.pendingMidi[#Lib.pendingMidi + 1] = { path = path, file = file, jsonFile = jsonFile }
+				Lib.add({
+					id = "midi:" .. file, name = file:gsub("%.[Mm][Ii][Dd][Ii]?$", ""):gsub("_", " "), artist = "Local MIDI",
+					tags = folder == "guitar" and { "local", "guitar" } or { "local" }, duration = 0, count = 0, nps = 0,
+					source = "midi", path = path, added = os.time(),
+				})
+			end
 		end
 	end
 	for _, b in ipairs(BUILTIN) do
@@ -940,13 +1244,13 @@ function Lib.convertPending(onDone)
 			end)
 			if ok then
 				local out = ROOT .. "/songs/" .. m.jsonFile
+				song.tags = entry and entry.tags or { "local" }
 				FS.write(out, Songs.encode(song))
 				if entry then -- switch the library entry over to the converted file
 					entry.source, entry.path = "local", out
 					entry.duration, entry.count, entry.nps = song.duration, song.count, song.nps
-					entry.tags = { "local" }
 					entry.artist = "Local"
-					entry.search = (entry.name .. " local"):lower()
+					entry.search = (entry.name .. " local " .. table.concat(entry.tags, " ")):lower()
 				end
 				done += 1
 			else
@@ -1024,11 +1328,15 @@ end
 
 function Player.bestTranspose(song)
 	local best, bestScore = 0, -math.huge
+	local lo, hi = VP_LOW, VP_HIGH
+	if Guitar.active() then
+		lo, hi = Guitar.range()
+	end
 	for tr = -12, 12 do
 		local inRange = 0
 		for _, n in ipairs(song.notes) do
 			local p = n[2] + tr
-			if p >= VP_LOW and p <= VP_HIGH then
+			if p >= lo and p <= hi and not Player.muted[n[4]] then
 				inRange += 1
 			end
 		end
@@ -1168,6 +1476,9 @@ function Player.build(song)
 	table.sort(out, function(a, b)
 		return a.t < b.t
 	end)
+	if Guitar.active() then
+		out = Guitar.assign(out)
+	end
 	out = Perform.improvise(song, out, rng)
 	table.sort(out, function(a, b)
 		return a.t < b.t
@@ -1175,7 +1486,7 @@ function Player.build(song)
 	-- drop machine-gun repeats of the same physical key
 	local final, last = {}, {}
 	for _, e in ipairs(out) do
-		local code = e.key.code
+		local code = e.key.char or e.key.code
 		if not last[code] or e.t - last[code] >= S.MinRepeat then
 			last[code] = e.t
 			final[#final + 1] = e
@@ -1227,6 +1538,17 @@ function Player.load(song, entry)
 	Keys.releaseAll()
 	Player.song, Player.entry = song, entry
 	Player.muted = {}
+	local tags = (entry and entry.tags) or song.tags or {}
+	if S.Guitar.AutoSwitch and table.find(tags, "guitar") and not Guitar.active() then
+		S.Instrument = "Guitar"
+		if UI.notify then
+			UI.notify("Guitar song - switched to Guitar mode")
+		end
+		saveSettings()
+	end
+	if Guitar.active() and S.Guitar.TracksOnly then
+		Player.muted = Guitar.autoMute(song)
+	end
 	if S.AutoTranspose then
 		S.Transpose = Player.bestTranspose(song)
 	end
@@ -1448,6 +1770,9 @@ function Player.step(dt)
 	local now = os.clock()
 	Keys.update(now)
 	Perform.update(now)
+	if Guitar.active() then
+		Guitar.update(now)
+	end
 	if Live.speedTarget then -- smooth live tempo changes
 		S.Speed += (Live.speedTarget - S.Speed) * math.min(1, dt * 3)
 		if math.abs(Live.speedTarget - S.Speed) < 0.003 then
@@ -1503,6 +1828,9 @@ function Player.step(dt)
 				break
 			end
 			Keys.press(key, hold)
+			if Guitar.active() then
+				Guitar.technique(e, now)
+			end
 			if UI.flashKey then
 				UI.flashKey(p)
 			end
@@ -2670,6 +2998,9 @@ local quick = text({ Parent = nowBar, Position = UDim2.new(0, 430, 0, 8), Size =
 
 local function quickText()
 	local parts = { ("%.2gx"):format(S.Speed), (S.Transpose >= 0 and "+" or "") .. S.Transpose .. " st", S.NoteMode }
+	if S.Instrument == "Guitar" then
+		table.insert(parts, 1, "🎸 " .. S.Guitar.Tuning)
+	end
 	if S.Human.Enabled then
 		parts[#parts + 1] = "Human: " .. S.Human.Preset
 	end
@@ -2693,6 +3024,7 @@ local playerPage = makePage("Player", "▶", true)
 local queuePage = makePage("Queue", "☰", true)
 local humanPage = makePage("Humanize", "✋", true)
 local performPage = makePage("Perform", "✦", true)
+local guitarPage = makePage("Guitar", "🎸", true)
 local importPage = makePage("Import", "⇩", true)
 local settingsPage = makePage("Settings", "⚙", true)
 
@@ -2893,8 +3225,13 @@ function UI.renderChips()
 		return a[2] > b[2]
 	end)
 	local chips = { "All", "★ Favorites", "Recent" }
+	if counts.guitar then
+		chips[#chips + 1] = "Guitar"
+	end
 	for k = 1, math.min(#tags, 10) do
-		chips[#chips + 1] = tags[k][1]:sub(1, 1):upper() .. tags[k][1]:sub(2)
+		if tags[k][1] ~= "guitar" then
+			chips[#chips + 1] = tags[k][1]:sub(1, 1):upper() .. tags[k][1]:sub(2)
+		end
 	end
 	for k, name in ipairs(chips) do
 		local on = Filter.chip == name
@@ -2929,6 +3266,13 @@ sortBtn.MouseButton1Click:Connect(function()
 	saveSettings()
 	UI.renderList()
 end)
+
+function UI.showGuitarChip()
+	Filter.chip = "Guitar"
+	UI.renderChips()
+	UI.renderList()
+	selectTab("Library")
+end
 
 function UI.playFirstVisible()
 	if visible[1] then
@@ -3086,7 +3430,9 @@ function UI.renderTracks()
 	end
 	for t = 0, song.trackCount - 1 do
 		local nm = song.tracks[t + 1]
-		local label = ("T%d %s"):format(t + 1, (nm and nm ~= "") and nm or "")
+		local prog = song.programs and song.programs[t + 1]
+		local inst = prog and ((prog >= 24 and prog <= 31) and "🎸" or (prog >= 32 and prog <= 39) and "bass" or (prog < 8) and "piano" or "") or ""
+		local label = ("T%d %s %s"):format(t + 1, inst, (nm and nm ~= "") and nm or "")
 		local b = btn({ Parent = tracksRow, Text = label, TextSize = 11, LayoutOrder = t, TextTruncate = Enum.TextTruncate.AtEnd })
 		local function render()
 			local on = not Player.muted[t]
@@ -3494,6 +3840,146 @@ C.note(settingsPage, ("PianoHub v%s  ·  files: workspace/%s/  ·  file access: 
 
 end
 do
+---------------------------------------------------------------- Guitar page
+do
+	local function reapply()
+		if Player.song then
+			if S.AutoTranspose then
+				S.Transpose = Player.bestTranspose(Player.song)
+			end
+			Player.muted = (Guitar.active() and S.Guitar.TracksOnly) and Guitar.autoMute(Player.song) or {}
+			UI.renderTracks()
+		end
+		Player.requestRebuild()
+		refreshAll()
+	end
+
+	C.section(guitarPage, "Instrument", "Pick Guitar when you're sitting at a guitar")
+	C.cycle(guitarPage, "Play on", { "Piano", "Guitar" }, function()
+		return S.Instrument
+	end, function(v)
+		S.Instrument = v
+		Keys.releaseAll()
+		reapply()
+	end, "Guitar: each key row is a string, keys to the right are higher frets")
+	C.cycle(guitarPage, "Tuning (match the game)", Guitar.TUNING_ORDER, function()
+		return S.Guitar.Tuning
+	end, function(v)
+		S.Guitar.Tuning = v
+		reapply()
+	end, "Must be the same as the TUNING button in the game")
+	C.toggle(guitarPage, "Switch to guitar for guitar songs", function()
+		return S.Guitar.AutoSwitch
+	end, function(v)
+		S.Guitar.AutoSwitch = v
+	end, "Songs tagged 'guitar' flip the instrument automatically")
+
+	C.section(guitarPage, "Playing")
+	C.toggle(guitarPage, "Guitar tracks only", function()
+		return S.Guitar.TracksOnly
+	end, function(v)
+		S.Guitar.TracksOnly = v
+		reapply()
+	end, "Mutes vocals, bass, piano etc. when the MIDI has guitar parts")
+	C.toggle(guitarPage, "Strum chords", function()
+		return S.Guitar.Strum
+	end, function(v)
+		S.Guitar.Strum = v
+		Player.requestRebuild()
+	end, "Alternating down / up strokes")
+	C.slider(guitarPage, "Strum speed", 4, 40, 1, function()
+		return S.Guitar.StrumMs
+	end, function(v)
+		S.Guitar.StrumMs = v
+		Player.requestRebuild()
+	end, function(v)
+		return v .. " ms / string"
+	end)
+	C.slider(guitarPage, "Max finger stretch", 3, 7, 1, function()
+		return S.Guitar.Stretch
+	end, function(v)
+		S.Guitar.Stretch = v
+		Player.requestRebuild()
+	end, function(v)
+		return v .. " frets"
+	end)
+	C.toggle(guitarPage, "Vibrato on long notes", function()
+		return S.Guitar.Vibrato
+	end, function(v)
+		S.Guitar.Vibrato = v
+	end, "Holds Ctrl while long notes ring")
+	C.toggle(guitarPage, "Palm-mute short low notes", function()
+		return S.Guitar.PalmMute
+	end, function(v)
+		S.Guitar.PalmMute = v
+	end, "Holds Space for quick notes on the E, A and D strings")
+	C.note(guitarPage, "In the game: keep CAPS (octave) off. RING on lets notes ring across strings, off cuts them.")
+
+	C.section(guitarPage, "Guitar songs", "Library songs tagged guitar + your workspace/" .. ROOT .. "/guitar folder")
+	C.buttons(guitarPage, {
+		{ "Rescan", function()
+			UI.reloadLibrary()
+		end },
+		{ "Show in Library", function()
+			UI.showGuitarChip()
+		end },
+	})
+	local list = new("Frame", { Parent = guitarPage, Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, BackgroundTransparency = 1,
+		LayoutOrder = nextOrder() }, { vlist(5) })
+
+	function UI.renderGuitarList()
+		for _, c in ipairs(list:GetChildren()) do
+			if not c:IsA("UIListLayout") then
+				c:Destroy()
+			end
+		end
+		local songs = {}
+		for _, e in ipairs(Lib.entries) do
+			if table.find(e.tags or {}, "guitar") then
+				songs[#songs + 1] = e
+			end
+		end
+		table.sort(songs, function(a, b)
+			return a.name:lower() < b.name:lower()
+		end)
+		if #songs == 0 then
+			text({ Parent = list, Size = UDim2.new(1, 0, 0, 30), Text = "No guitar songs yet - see below for where to get them.", TextColor3 = Theme.Dim, LayoutOrder = 1 })
+		end
+		for k, e in ipairs(songs) do
+			if k > 200 then
+				break
+			end
+			local r = new("Frame", { Parent = list, Size = UDim2.new(1, 0, 0, 38), BackgroundColor3 = Theme.Panel2, LayoutOrder = k }, { corner(6) })
+			text({ Parent = r, Position = UDim2.fromOffset(12, 0), Size = UDim2.new(1, -130, 1, 0), TextSize = 12,
+				Text = ("%s  ·  %s%s"):format(e.name, e.artist, (e.duration or 0) > 0 and ("  ·  " .. fmtTime(e.duration)) or "") })
+			btn({ Parent = r, Size = UDim2.fromOffset(30, 28), Position = UDim2.new(1, -112, 0.5, -14), Text = "🔥", BackgroundColor3 = Theme.Panel3 }, function()
+				Player.playEntry(e)
+				task.delay(0.3, function()
+					if Player.entry == e then
+						Perform.warmupAndPlay()
+					end
+				end)
+			end)
+			btn({ Parent = r, Size = UDim2.fromOffset(30, 28), Position = UDim2.new(1, -78, 0.5, -14), Text = "+", TextSize = 16, BackgroundColor3 = Theme.Panel3 }, function()
+				table.insert(Player.queue, e)
+				UI.notify("Queued: " .. e.name)
+				UI.renderQueue()
+			end)
+			local play = btn({ Parent = r, Size = UDim2.fromOffset(36, 28), Position = UDim2.new(1, -44, 0.5, -14), Text = "▶" }, function()
+				Player.playEntry(e)
+			end)
+			accent(play, "BackgroundColor3")
+		end
+	end
+
+	C.section(guitarPage, "Where to get guitar songs")
+	C.note(guitarPage, "1. Put any .mid file in  workspace/" .. ROOT .. "/guitar/  and press Rescan. It is converted once and saved, so you can delete the .mid afterwards.")
+	C.note(guitarPage, "2. MuseScore (musescore.com): open a guitar score in the free MuseScore Studio app, then File > Export > MIDI. Solo / fingerstyle / 'guitar only' arrangements sound best.")
+	C.note(guitarPage, "3. Guitar Pro tabs (.gp, .gp5, .gpx - Ultimate Guitar, GProTab): open them in the free TuxGuitar or MuseScore Studio and export as MIDI.")
+	C.note(guitarPage, "4. Full-band MIDIs work too: 'Guitar tracks only' keeps just the guitar parts. Use Player > Tracks to pick parts by hand.")
+	C.note(guitarPage, "5. To share a song with everyone: Discord bot  /addsong  with  instrument: Guitar.")
+end
+
 ---------------------------------------------------------------- Perform page
 C.section(performPage, "Warm up", "Scales, arpeggios and finger exercises in the song's key, then the song")
 UI.keyLabel = C.note(performPage, "Key: -")
@@ -3780,8 +4266,14 @@ function UI.reloadLibrary()
 		sideInfo.Text = ("%d songs\n%d online · %d local"):format(#Lib.entries, Lib.remoteCount, #Lib.entries - Lib.remoteCount)
 		UI.renderChips()
 		UI.renderList()
+		if UI.renderGuitarList then
+			UI.renderGuitarList()
+		end
 		Lib.convertPending(function(done, failed)
 			if done > 0 then
+				if UI.renderGuitarList then
+					UI.renderGuitarList()
+				end
 				UI.notify(("Converted %d MIDI file%s - saved in %s/songs. You can delete the .mid files now."):format(done, done == 1 and "" or "s", ROOT))
 				UI.renderList()
 			end
@@ -3890,7 +4382,7 @@ function Hub.Unload()
 end
 
 Hub.Player, Hub.Library, Hub.Songs, Hub.Settings = Player, Lib, Songs, S
-Hub.Music, Hub.Perform, Hub.Live = Music, Perform, Live
+Hub.Music, Hub.Perform, Hub.Live, Hub.Guitar = Music, Perform, Live, Guitar
 
 ---------------------------------------------------------------------------------------------------
 -- go

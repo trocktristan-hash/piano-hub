@@ -20,7 +20,7 @@ import zipfile
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from pianolib import Library, MidiError, make_song, parse_midi, slugify  # noqa: E402
 
-BASE = "https://www.mutopiaproject.org/cgibin/make-table.cgi?startat={}&Instrument=Piano"
+BASE = "https://www.mutopiaproject.org/cgibin/make-table.cgi?startat={}&Instrument={}"
 UA = {"User-Agent": "PianoHub-library-builder/1.0 (+personal use)"}
 HERE = os.path.dirname(os.path.abspath(__file__))
 CACHE = os.path.join(HERE, ".cache")
@@ -63,10 +63,10 @@ def clean(cell):
     return html.unescape(re.sub(r"<[^>]+>", "", cell)).replace("\xa0", " ").strip()
 
 
-def scrape_listing():
+def scrape_listing(listing="Piano"):
     pieces, start = [], 0
     while True:
-        page = fetch(BASE.format(start))
+        page = fetch(BASE.format(start, listing))
         for table in re.findall(r'<table class="table-bordered result-table">(.*?)</table>', page, re.S):
             cells = re.findall(r"<td>(.*?)</td>", table, re.S)
             if len(cells) < 12:
@@ -91,6 +91,10 @@ def scrape_listing():
     return pieces
 
 
+def is_solo_guitar(p):
+    return re.fullmatch(r"for (classical )?guitar( solo)?( \(.*\))?", p["instrument"].lower()) is not None
+
+
 def is_solo_piano(p):
     inst = p["instrument"].lower()
     return re.fullmatch(r"for (piano|harpsichord|piano or harpsichord|harpsichord or piano|clavichord|keyboard)"
@@ -111,13 +115,15 @@ def short_composer(c):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--limit", type=int, default=600)
+    ap.add_argument("--limit", type=int, default=600, help="stop when the library has this many songs")
+    ap.add_argument("--instrument", choices=["piano", "guitar"], default="piano")
     ap.add_argument("--min-sec", type=float, default=20)
     ap.add_argument("--max-sec", type=float, default=480)
     ap.add_argument("--max-nps", type=float, default=16)
     a = ap.parse_args()
 
-    pieces = [p for p in scrape_listing() if is_solo_piano(p)]
+    guitar = a.instrument == "guitar"
+    pieces = [p for p in scrape_listing("Guitar" if guitar else "Piano") if (is_solo_guitar(p) if guitar else is_solo_piano(p))]
     pieces.sort(key=lambda p: (priority(p), p["composer"], p["title"]))
     print(f"{len(pieces)} solo keyboard pieces")
 
@@ -146,7 +152,7 @@ def main():
             files.append((p["title"], blob))
 
         for title, data in files:
-            sid = slugify(f"{artist}-{title}")
+            sid = slugify(f"{'guitar-' if guitar else ''}{artist}-{title}")
             if sid in have:
                 continue
             try:
@@ -158,7 +164,9 @@ def main():
                 continue
             tags = [p["style"].lower()] if p["style"].lower() in STYLE_TAGS else []
             tags.append("mutopia")
-            song = make_song(parsed.notes, title, artist, tags, song_id=sid, tracks=parsed.track_names,
+            if guitar:
+                tags.append("guitar")
+            song = make_song(parsed.notes, title, artist, tags, song_id=sid, tracks=parsed.track_names, programs=parsed.track_programs,
                              bpm=parsed.bpm, source="https://www.mutopiaproject.org", license_=p["license"])
             if not (a.min_sec <= song["duration"] <= a.max_sec) or song["nps"] > a.max_nps:
                 continue
