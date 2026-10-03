@@ -53,10 +53,12 @@ Sit at the piano, choose a song, then click back into the game window during the
 | **Player** | Live 61-key visualizer, speed 0.25–3×, transpose ±24 with **auto transpose**, out-of-range notes (Fold / Drop / **88-key Ctrl** mode), Tap or **Hold** notes (real note lengths), tap length, left/right hand only with a split point, chord cap, same-key repeat guard, per-track mute, loop off/one/all, autoplay next, shuffle |
 | **Queue** | Reorder, remove, shuffle, play queue, history |
 | **Humanize** | Presets: Natural / Expressive / Sloppy / Beginner. Timing jitter, chord rolling (strum), tempo drift (rubato), pauses between phrases, hold-length variance, missed notes, wrong notes with self-correction, 10-finger limit (5 notes per hand). Each play is randomized again. |
+| **Perform** | **Warm up** (scales, arpeggios and finger exercises in the song's key; longer and flashier before crazy songs), **song transitions** (Cadence / Glissando / Playful "shave and a haircut" / Noodle bridge into the next key), **Improv** (grace notes, trills, mordents, fills in rests, broken chords, octave doubling, improvised intro, big finish), with automatic key detection |
+| **LIVE panel** | Floating window while playing: tempo −/+ (eased), rubato, left/right hand on/off, octave shift, Improv/Human toggles, and actions: Hesitate, Slip-up, Redo phrase, Flourish, Warm up, Next song, Big ending, Stop |
 | **Import** | Paste a Virtual Piano sheet, load a `.mid`/`.json` from a URL, save to your local library, rescan local files |
 | **Settings** | Library URL, reload, clear cache, countdown, pause while typing in chat, notifications, rebindable hotkeys, accent colour, UI scale, release stuck keys, unload |
 
-**Default hotkeys:** `RightControl` hides/shows the window, `F2` play/pause, `F3` stop, `F4` next, `F1` previous.
+**Default hotkeys:** `RightControl` hides/shows the window, `F2` play/pause, `F3` stop, `F4` next, `F1` previous, `F5` hesitate, `F6` flourish, `F7` big ending, `F8` live panel.
 
 **Local songs (no bot needed):** put `.mid` files in `workspace/PianoHub/midi/` inside your executor's
 folder and press **Rescan**. They're parsed in-game by the built-in Lua MIDI reader.
