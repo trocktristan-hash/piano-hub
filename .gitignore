@@ -1,0 +1,5 @@
+tools/.cache/
+tools/__pycache__/
+bot/__pycache__/
+bot/.env
+build.log
