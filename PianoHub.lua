@@ -744,15 +744,34 @@ local BUILTIN = {
 
 local Lib = { entries = {}, byId = {}, songCache = {}, cacheOrder = {}, remoteCount = 0, status = "Loading..." }
 
-local function libraryBase()
-	local url = S.LibraryURL or ""
+-- accepts raw links and normal github.com links (repo, /tree/, /blob/, index.json) and turns them into the raw library folder
+local function normalizeLibraryURL(url)
+	url = (url or ""):gsub("^%s+", ""):gsub("%s+$", "")
 	if url == "" or url:find("YOUR_GITHUB_USER", 1, true) then
 		return nil
+	end
+	url = url:gsub("index%.json.*$", "")
+	local user, repo, rest = url:match("^https?://github%.com/([^/]+)/([^/]+)/?(.*)$")
+	if user then
+		repo = repo:gsub("%.git$", "")
+		local branch, path = rest:match("^tree/([^/]+)/?(.*)$")
+		if not branch then
+			branch, path = rest:match("^blob/([^/]+)/?(.*)$")
+		end
+		branch, path = branch or "main", path or ""
+		if path == "" then
+			path = "library"
+		end
+		url = ("https://raw.githubusercontent.com/%s/%s/%s/%s"):format(user, repo, branch, path)
 	end
 	if url:sub(-1) ~= "/" then
 		url ..= "/"
 	end
 	return url
+end
+
+local function libraryBase()
+	return normalizeLibraryURL(S.LibraryURL) or normalizeLibraryURL(CONFIG.LibraryURL)
 end
 
 -- raw.githubusercontent.com/<user>/<repo>/<branch>/<path>/  ->  jsDelivr mirror of the same folder
@@ -807,6 +826,16 @@ function Lib.load()
 	local index
 	if base then
 		local body, why = Lib.fetch("index.json", true)
+		if not body and normalizeLibraryURL(S.LibraryURL) ~= normalizeLibraryURL(CONFIG.LibraryURL) then
+			local saved = S.LibraryURL
+			S.LibraryURL = CONFIG.LibraryURL -- the saved link is broken: use the built-in one
+			body, why = Lib.fetch("index.json", true)
+			if body then
+				saveSettings()
+			else
+				S.LibraryURL = saved
+			end
+		end
 		local decodeErr
 		if body then
 			index, decodeErr = jdecode(body)
