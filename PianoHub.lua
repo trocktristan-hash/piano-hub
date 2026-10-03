@@ -112,29 +112,43 @@ for _, d in ipairs({ ROOT, ROOT .. "/cache", ROOT .. "/songs", ROOT .. "/midi" }
 	FS.mkdir(d)
 end
 
+local function validBody(b)
+	return type(b) == "string" and b ~= "" and not b:match("^%s*404: Not Found") and not b:match("^%s*400: Invalid request")
+end
+
+-- returns body or nil, reason. Tries every HTTP method executors commonly expose.
 local function httpGet(url)
+	local reasons = {}
 	local ok, res = pcall(function()
-		return game:HttpGet(url, true)
+		return game:HttpGet(url)
 	end)
-	if ok and type(res) == "string" and res ~= "" and not res:match("^404: Not Found") then
+	if ok and validBody(res) then
 		return res
 	end
-	local req = (syn and syn.request) or (http and http.request) or http_request or request
+	reasons[#reasons + 1] = "HttpGet: " .. (ok and ("bad response " .. tostring(res):sub(1, 40)) or tostring(res):sub(1, 80))
+	local req = (syn and syn.request) or (http and http.request) or (fluxus and fluxus.request) or http_request or request
 	if req then
 		local ok2, r = pcall(req, { Url = url, Method = "GET" })
-		if ok2 and r and (r.StatusCode == 200 or r.Success == true) and type(r.Body) == "string" then
+		if ok2 and type(r) == "table" and (r.StatusCode == 200 or r.Success == true) and validBody(r.Body) then
 			return r.Body
 		end
+		reasons[#reasons + 1] = "request: " .. (ok2 and type(r) == "table" and ("status " .. tostring(r.StatusCode)) or tostring(r):sub(1, 80))
 	end
-	return nil
+	return nil, table.concat(reasons, " | ")
 end
 
 local function jdecode(s)
 	if type(s) ~= "string" then
-		return nil
+		return nil, "no data"
+	end
+	if s:sub(1, 3) == string.char(239, 187, 191) then
+		s = s:sub(4) -- strip UTF-8 BOM
 	end
 	local ok, r = pcall(HttpService.JSONDecode, HttpService, s)
-	return ok and r or nil
+	if ok then
+		return r
+	end
+	return nil, tostring(r)
 end
 
 local function jencode(t)
@@ -201,6 +215,9 @@ do
 	local saved = jdecode(FS.read(SETTINGS_PATH))
 	if type(saved) == "table" then
 		merge(S, saved)
+	end
+	if S.LibraryURL == "" or S.LibraryURL:find("YOUR_GITHUB_USER", 1, true) then
+		S.LibraryURL = CONFIG.LibraryURL
 	end
 end
 
@@ -738,6 +755,41 @@ local function libraryBase()
 	return url
 end
 
+-- raw.githubusercontent.com/<user>/<repo>/<branch>/<path>/  ->  jsDelivr mirror of the same folder
+local function mirrorBase(base)
+	local user, repo, branch, rest = base:match("^https?://raw%.githubusercontent%.com/([^/]+)/([^/]+)/([^/]+)/(.*)$")
+	if user then
+		return ("https://cdn.jsdelivr.net/gh/%s/%s@%s/%s"):format(user, repo, branch, rest)
+	end
+	return nil
+end
+
+-- fetch a file from the library, trying cache-busted, plain and mirror URLs. returns body or nil, reason
+function Lib.fetch(rel, bust)
+	local base = libraryBase()
+	if not base then
+		return nil, "no library URL set"
+	end
+	local urls = {}
+	if bust then
+		urls[#urls + 1] = base .. rel .. "?t=" .. tostring(os.time())
+	end
+	urls[#urls + 1] = base .. rel
+	local mirror = mirrorBase(base)
+	if mirror then
+		urls[#urls + 1] = mirror .. rel
+	end
+	local reasons = {}
+	for _, url in ipairs(urls) do
+		local body, why = httpGet(url)
+		if body then
+			return body
+		end
+		reasons[#reasons + 1] = why
+	end
+	return nil, table.concat(reasons, " || ")
+end
+
 function Lib.add(e)
 	if Lib.byId[e.id] then
 		return
@@ -754,12 +806,22 @@ function Lib.load()
 	local base = libraryBase()
 	local index
 	if base then
-		local body = httpGet(base .. "index.json?t=" .. tostring(os.time()))
-		index = jdecode(body)
+		local body, why = Lib.fetch("index.json", true)
+		local decodeErr
+		if body then
+			index, decodeErr = jdecode(body)
+			if type(index) ~= "table" or type(index.songs) ~= "table" then
+				why = "index.json unreadable: " .. tostring(decodeErr or "no songs list") .. " (got " .. #body .. " bytes: " .. body:sub(1, 30) .. ")"
+				index = nil
+			end
+		end
 		if index then
 			FS.write(ROOT .. "/cache/index.json", body)
 			Lib.status = "Online"
+			Lib.error = nil
 		else
+			Lib.error = why
+			warn("[PianoHub] library download failed: " .. tostring(why))
 			index = jdecode(FS.read(ROOT .. "/cache/index.json"))
 			Lib.status = index and "Offline (cached)" or "Library unreachable"
 		end
@@ -830,8 +892,9 @@ function Lib.get(e, callback)
 				local body = FS.read(cachePath)
 				if not body then
 					assert(base, "no library URL")
-					body = httpGet(base .. "songs/" .. HttpService:UrlEncode(e.id) .. ".json")
-					assert(body, "download failed")
+					local why
+					body, why = Lib.fetch("songs/" .. e.id .. ".json", false)
+					assert(body, "download failed: " .. tostring(why))
 					FS.write(cachePath, body)
 				end
 				return Songs.fromData(assert(jdecode(body), "bad song file"), e)
@@ -2626,6 +2689,8 @@ function UI.reloadLibrary()
 		UI.renderList()
 		if Lib.status == "No library URL set" then
 			UI.notify("Set your library URL in Settings to load the full song library.", true)
+		elseif Lib.error then
+			UI.notify("Couldn't download the song library: " .. tostring(Lib.error):sub(1, 220), true)
 		end
 	end)
 end
