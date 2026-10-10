@@ -16,6 +16,8 @@ piano-hub/
 └─ bot/                  Discord bot: /addsong etc. commits straight to the repo
 ```
 
+> `floor-assist/` is a separate, unrelated web app (an AI sales-floor assistant). See [floor-assist/README.md](floor-assist/README.md).
+
 The bundled library has **388 solo piano pieces** and **336 classical guitar pieces** (Beethoven, Chopin, Bach, Debussy, Satie,
 Joplin, Mozart, Schumann, Grieg …) taken from the [Mutopia Project](https://www.mutopiaproject.org).
 Every song file keeps its license (public domain or Creative Commons).

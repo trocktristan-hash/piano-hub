@@ -1,0 +1,13 @@
+{
+  "name": "Floor Assist",
+  "short_name": "Floor Assist",
+  "description": "AI sales-floor assistant with in-store stock filtering",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#0a2a66",
+  "theme_color": "#0a2a66",
+  "icons": [
+    { "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+  ]
+}

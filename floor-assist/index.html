@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0a2a66">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>Floor Assist</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="icon.svg">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="topbar">
+  <button class="icon-btn" id="btnSessions" title="Customers" aria-label="Customers">☰</button>
+  <div class="title">
+    <div class="session-name" id="sessionName">New customer</div>
+    <div class="store-line" id="storeLine">No store set</div>
+  </div>
+  <button class="icon-btn" id="btnShortlist" title="Shortlist" aria-label="Shortlist">★<span class="badge" id="shortlistCount" hidden>0</span></button>
+  <button class="icon-btn" id="btnSettings" title="Settings" aria-label="Settings">⚙</button>
+</header>
+
+<div class="stockbar">
+  <label class="seg"><input type="radio" name="stockMode" value="store"><span>My store only</span></label>
+  <label class="seg"><input type="radio" name="stockMode" value="nearby"><span>Nearby stores</span></label>
+  <label class="seg"><input type="radio" name="stockMode" value="any"><span>Anything</span></label>
+  <input class="budget" id="budget" type="number" inputmode="numeric" placeholder="Max $" aria-label="Max budget">
+</div>
+
+<section id="livePanel" class="live" hidden>
+  <div class="live-head">
+    <span class="dot"></span><strong>Listening</strong>
+    <span class="muted" id="liveEngine"></span>
+    <span class="spacer"></span>
+    <button class="chip" id="btnSuggestNow">Suggest now</button>
+    <button class="chip danger" id="btnStopListen">Stop</button>
+  </div>
+  <div class="consent">Let the customer know you're using an assistant that listens, and follow store policy.</div>
+  <details class="transcript-wrap"><summary>Transcript</summary><div id="transcript" class="transcript"></div></details>
+  <div id="liveTips" class="live-tips"></div>
+</section>
+
+<main id="chat" class="chat"></main>
+
+<div class="chips" id="quickChips"></div>
+
+<footer class="composer">
+  <div id="attachPreview" class="attach-preview"></div>
+  <div class="composer-row">
+    <button class="icon-btn" id="btnAttach" title="Attach photo" aria-label="Attach photo">📷</button>
+    <button class="icon-btn" id="btnScan" title="Scan barcode / SKU lookup" aria-label="Scan barcode">▥</button>
+    <textarea id="input" rows="1" placeholder="Describe what the customer needs…"></textarea>
+    <button class="icon-btn" id="btnListen" title="Listening mode" aria-label="Listening mode">🎙</button>
+    <button class="send-btn" id="btnSend" aria-label="Send">➤</button>
+  </div>
+  <input type="file" id="fileInput" accept="image/*" multiple hidden>
+</footer>
+
+<!-- Sessions drawer -->
+<aside id="sessionsDrawer" class="drawer left" hidden>
+  <div class="drawer-head"><strong>Customers</strong><button class="icon-btn" data-close>✕</button></div>
+  <button class="primary wide" id="btnNewSession">+ New customer</button>
+  <div id="sessionList" class="session-list"></div>
+  <label class="field">Notes for this customer
+    <textarea id="sessionNotes" rows="4" placeholder="Name, budget, what they already own, follow-up date…"></textarea>
+  </label>
+</aside>
+
+<!-- Shortlist drawer -->
+<aside id="shortlistDrawer" class="drawer right" hidden>
+  <div class="drawer-head"><strong>Shortlist</strong><button class="icon-btn" data-close>✕</button></div>
+  <div id="shortlistItems"></div>
+  <div class="drawer-actions">
+    <button class="primary" id="btnCompare">Compare selected</button>
+    <button id="btnShare">Share / copy list</button>
+  </div>
+</aside>
+
+<!-- Settings -->
+<dialog id="settingsDlg">
+  <form method="dialog" class="dlg">
+    <h2>Settings</h2>
+    <label class="field">Gemini API key
+      <input id="setGemini" type="password" autocomplete="off" placeholder="AIza…">
+      <small>Get one free at aistudio.google.com/apikey. Stored only on this device.</small>
+    </label>
+    <label class="field">Gemini model
+      <div class="row"><input id="setModel" list="modelList" placeholder="gemini-2.5-flash"><button type="button" id="btnLoadModels">Load list</button></div>
+      <datalist id="modelList"></datalist>
+    </label>
+    <label class="field">Best Buy API key
+      <input id="setBB" type="password" autocomplete="off" placeholder="from developer.bestbuy.com">
+      <small>Free key from developer.bestbuy.com. Used for product search &amp; store stock.</small>
+    </label>
+    <label class="check"><input type="checkbox" id="setDemo"> Demo inventory (try the app without a Best Buy key)</label>
+    <fieldset>
+      <legend>My store</legend>
+      <div class="row"><input id="setZip" inputmode="numeric" placeholder="ZIP" value="32159"><button type="button" id="btnFindStores">Find stores</button></div>
+      <div id="storeResults" class="store-results"></div>
+      <div class="muted" id="currentStore"></div>
+      <label class="field">"Nearby stores" radius (miles)
+        <input id="setRadius" type="number" min="5" max="100" value="25">
+      </label>
+    </fieldset>
+    <label class="field">Listening: auto-suggest every (seconds)
+      <input id="setInterval" type="number" min="8" max="120" value="20">
+    </label>
+    <label class="check"><input type="checkbox" id="setWakeLock" checked> Keep screen awake while listening</label>
+    <div class="dlg-actions">
+      <button type="button" id="btnClearData" class="danger">Erase all data</button>
+      <span class="spacer"></span>
+      <button value="close" class="primary">Done</button>
+    </div>
+  </form>
+</dialog>
+
+<!-- Scanner / SKU lookup -->
+<dialog id="scanDlg">
+  <form method="dialog" class="dlg">
+    <h2>Look up an item</h2>
+    <video id="scanVideo" playsinline muted hidden></video>
+    <div class="muted" id="scanStatus"></div>
+    <div class="row">
+      <input id="scanInput" inputmode="numeric" placeholder="SKU or UPC">
+      <button type="button" id="btnScanLookup" class="primary">Look up</button>
+    </div>
+    <div id="scanResult"></div>
+    <div class="dlg-actions"><span class="spacer"></span><button value="close">Close</button></div>
+  </form>
+</dialog>
+
+<!-- Compare -->
+<dialog id="compareDlg">
+  <form method="dialog" class="dlg wide">
+    <h2>Compare</h2>
+    <div id="compareTable" class="compare-wrap"></div>
+    <div id="compareAI"></div>
+    <div class="dlg-actions">
+      <button type="button" id="btnCompareAI">AI: which fits this customer?</button>
+      <span class="spacer"></span><button value="close" class="primary">Close</button>
+    </div>
+  </form>
+</dialog>
+
+<div id="toast" class="toast" hidden></div>
+
+<script src="app.js"></script>
+</body>
+</html>
