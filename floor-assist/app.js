@@ -22,10 +22,13 @@ async function copyText(text) {
   catch { toast('Copy failed'); }
 }
 
+const IS_IOS = /iP(hone|ad|od)/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+const IS_STANDALONE = navigator.standalone === true || matchMedia('(display-mode: standalone)').matches;
+
 // ---------- settings ----------
 const DEFAULTS = {
   geminiKey: '', bbKey: '', model: 'gemini-2.5-flash', demo: false,
-  zip: '32159', store: null, radius: 25, stockMode: 'store', interval: 20, wakeLock: true, budget: '',
+  zip: '32159', store: null, radius: 25, stockMode: 'store', interval: 20, wakeLock: true, budget: '', speechEngine: 'auto',
 };
 const settings = { ...DEFAULTS, ...LS.get('fa.settings', {}) };
 const saveSettings = () => LS.set('fa.settings', settings);
@@ -732,8 +735,10 @@ const Listen = {
     $('#livePanel').hidden = false;
     $('#btnListen').classList.add('on');
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    // iPhone home-screen apps don't reliably support Safari's speech recognition, so default to Gemini there.
+    const useDevice = SR && (settings.speechEngine === 'device' || (settings.speechEngine === 'auto' && !(IS_IOS && IS_STANDALONE)));
     try {
-      if (SR) this.startSR(SR); else await this.startRecorder();
+      if (useDevice) this.startSR(SR); else await this.startRecorder();
     } catch (e) { toast('Microphone: ' + e.message); this.stop(); return; }
     this.timer = setInterval(() => this.maybeAnalyze(), 3000);
     if (settings.wakeLock) this.lockScreen();
@@ -761,6 +766,7 @@ const Listen = {
     const rec = new SR();
     rec.continuous = true; rec.interimResults = true; rec.lang = navigator.language || 'en-US';
     rec.onresult = e => {
+      heard = true;
       let interim = '';
       for (let i = e.resultIndex; i < e.results.length; i++) {
         const r = e.results[i];
@@ -770,8 +776,14 @@ const Listen = {
       this.interim = interim;
       renderTranscript();
     };
+    let heard = false;
     rec.onerror = e => {
-      if (e.error === 'not-allowed' || e.error === 'service-not-allowed') { toast('Microphone permission denied'); this.stop(); }
+      if (!['not-allowed', 'service-not-allowed', 'audio-capture'].includes(e.error)) return;
+      this.rec = null;
+      if (!heard && settings.speechEngine !== 'device') {
+        // Built-in recognition is blocked (common on iPhone): fall back to Gemini transcription.
+        this.startRecorder().catch(err => { toast('Microphone: ' + err.message); this.stop(); });
+      } else { toast('Microphone permission denied'); this.stop(); }
     };
     rec.onend = () => { if (this.active && this.rec === rec) setTimeout(() => { try { rec.start(); } catch {} }, 250); };
     this.rec = rec;
@@ -804,10 +816,12 @@ const Listen = {
   async transcribe(blob) {
     try {
       this.interim = '(transcribing…)'; renderTranscript();
-      const data = await blobToBase64(blob);
+      let audio = blob;
+      try { audio = await toWav(blob); } catch {} // send the original clip if the browser can't decode it
+      const data = await blobToBase64(audio);
       const r = await gemini({
         contents: [{ role: 'user', parts: [
-          { inlineData: { mimeType: (blob.type || 'audio/webm').split(';')[0], data } },
+          { inlineData: { mimeType: (audio.type || 'audio/webm').split(';')[0], data } },
           { text: 'Transcribe this audio from a retail store conversation verbatim. Output only the transcript text. If there is no clear speech, output nothing.' },
         ] }],
         generationConfig: { temperature: 0 },
@@ -863,6 +877,28 @@ Transcript (most recent at the end):
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'visible' && Listen.active && settings.wakeLock) Listen.lockScreen();
 });
+
+/* Decode any recorded clip (webm / Safari's mp4) and re-encode as 16 kHz mono WAV, which Gemini always accepts. */
+async function toWav(blob) {
+  const AC = window.AudioContext || window.webkitAudioContext;
+  const ctx = new AC();
+  let decoded;
+  try { decoded = await ctx.decodeAudioData(await blob.arrayBuffer()); } finally { ctx.close?.(); }
+  const rate = 16000;
+  const off = new OfflineAudioContext(1, Math.ceil(decoded.duration * rate), rate);
+  const src = off.createBufferSource();
+  src.buffer = decoded; src.connect(off.destination); src.start();
+  const pcm = (await off.startRendering()).getChannelData(0);
+  const buf = new ArrayBuffer(44 + pcm.length * 2);
+  const v = new DataView(buf);
+  const str = (o, t) => [...t].forEach((c, i) => v.setUint8(o + i, c.charCodeAt(0)));
+  str(0, 'RIFF'); v.setUint32(4, 36 + pcm.length * 2, true); str(8, 'WAVE'); str(12, 'fmt ');
+  v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
+  v.setUint32(24, rate, true); v.setUint32(28, rate * 2, true); v.setUint16(32, 2, true); v.setUint16(34, 16, true);
+  str(36, 'data'); v.setUint32(40, pcm.length * 2, true);
+  for (let i = 0; i < pcm.length; i++) v.setInt16(44 + i * 2, Math.max(-1, Math.min(1, pcm[i])) * 0x7fff, true);
+  return new Blob([buf], { type: 'audio/wav' });
+}
 
 function blobToBase64(blob) {
   return new Promise((resolve, reject) => {
@@ -1051,6 +1087,7 @@ function openSettings() {
   $('#setRadius').value = settings.radius;
   $('#setInterval').value = settings.interval;
   $('#setWakeLock').checked = settings.wakeLock;
+  $('#setSpeech').value = settings.speechEngine;
   $('#storeResults').innerHTML = '';
   showCurrentStore();
   $('#settingsDlg').showModal();
@@ -1112,11 +1149,12 @@ async function openScanner() {
   $('#scanInput').value = '';
   $('#scanDlg').showModal();
   const video = $('#scanVideo');
-  if (!('BarcodeDetector' in window) || !navigator.mediaDevices?.getUserMedia) {
-    $('#scanStatus').textContent = 'Camera barcode scanning isn\'t supported in this browser — type the SKU or UPC.';
+  if (!navigator.mediaDevices?.getUserMedia) {
+    $('#scanStatus').textContent = 'Camera isn\'t available here — type the SKU or UPC.';
     video.hidden = true;
     return;
   }
+  if (!('BarcodeDetector' in window)) return startZxing(video); // iPhone/iPad Safari
   try {
     const detector = new BarcodeDetector({ formats: ['upc_a', 'upc_e', 'ean_13', 'ean_8', 'code_128'] });
     scanStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
@@ -1133,7 +1171,38 @@ async function openScanner() {
     video.hidden = true;
   }
 }
+// Barcode scanning via the bundled ZXing library for browsers without BarcodeDetector.
+let zxReader = null;
+function loadScript(src) {
+  return new Promise((resolve, reject) => {
+    const s = document.createElement('script');
+    s.src = src; s.onload = resolve; s.onerror = () => reject(new Error('could not load scanner'));
+    document.head.appendChild(s);
+  });
+}
+async function startZxing(video) {
+  $('#scanStatus').textContent = 'Starting camera…';
+  try {
+    if (!window.ZXing) await loadScript('vendor/zxing.min.js');
+    const Z = window.ZXing;
+    const hints = new Map([[Z.DecodeHintType.POSSIBLE_FORMATS, [Z.BarcodeFormat.UPC_A, Z.BarcodeFormat.UPC_E, Z.BarcodeFormat.EAN_13, Z.BarcodeFormat.EAN_8, Z.BarcodeFormat.CODE_128]]]);
+    zxReader = new Z.BrowserMultiFormatReader(hints, 300);
+    video.hidden = false;
+    await zxReader.decodeFromConstraints({ video: { facingMode: 'environment' } }, video, result => {
+      if (!result || !zxReader) return;
+      const v = result.getText();
+      stopScanner(); $('#scanInput').value = v; lookupCode(v);
+    });
+    $('#scanStatus').textContent = 'Point at the barcode on the box or tag…';
+  } catch (e) {
+    stopScanner();
+    $('#scanStatus').textContent = 'Camera unavailable (' + (e.message || e.name) + ') — type the SKU or UPC.';
+  }
+}
+
 function stopScanner() {
+  try { zxReader?.reset(); } catch {}
+  zxReader = null;
   clearInterval(scanLoop); scanLoop = null;
   scanStream?.getTracks().forEach(t => t.stop()); scanStream = null;
   $('#scanVideo').hidden = true;
@@ -1181,6 +1250,13 @@ function autoGrow() {
   const t = $('#input');
   t.style.height = 'auto';
   t.style.height = Math.min(140, t.scrollHeight) + 'px';
+}
+
+// iOS Safari doesn't shrink the page when the keyboard opens; follow the visual viewport instead.
+function fitViewport() {
+  if (!window.visualViewport) return;
+  document.body.style.height = visualViewport.height + 'px';
+  window.scrollTo(0, 0);
 }
 
 function init() {
@@ -1243,6 +1319,7 @@ function init() {
   bind('#setRadius', 'radius', v => Math.max(5, Number(v) || 25));
   bind('#setInterval', 'interval', v => Math.max(8, Number(v) || 20));
   bind('#setWakeLock', 'wakeLock');
+  bind('#setSpeech', 'speechEngine');
   $('#setDemo').addEventListener('change', () => {
     stockCache.clear();
     if (settings.demo && !settings.store) pickStore(Demo.STORE);
@@ -1260,6 +1337,12 @@ function init() {
   $('#scanDlg').addEventListener('close', stopScanner);
   $('#btnScanLookup').onclick = () => lookupCode($('#scanInput').value);
   $('#scanInput').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); lookupCode(e.target.value); } });
+
+  if (window.visualViewport) { visualViewport.addEventListener('resize', fitViewport); fitViewport(); }
+  if (IS_IOS && !IS_STANDALONE && !LS.get('fa.iosTip', false)) {
+    LS.set('fa.iosTip', true);
+    setTimeout(() => toast('Tip: tap Share → Add to Home Screen to use this like an app', 6000), 1500);
+  }
 
   renderAll();
   saveSessions();

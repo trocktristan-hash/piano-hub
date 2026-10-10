@@ -9,7 +9,8 @@
 <title>Floor Assist</title>
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="icon" href="icon.svg" type="image/svg+xml">
-<link rel="apple-touch-icon" href="icon.svg">
+<link rel="apple-touch-icon" href="icon-180.png">
+<meta name="apple-mobile-web-app-title" content="Floor Assist">
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -52,7 +53,7 @@
   <div class="composer-row">
     <button class="icon-btn" id="btnAttach" title="Attach photo" aria-label="Attach photo">📷</button>
     <button class="icon-btn" id="btnScan" title="Scan barcode / SKU lookup" aria-label="Scan barcode">▥</button>
-    <textarea id="input" rows="1" placeholder="Describe what the customer needs…"></textarea>
+    <textarea id="input" rows="1" placeholder="Customer needs…"></textarea>
     <button class="icon-btn" id="btnListen" title="Listening mode" aria-label="Listening mode">🎙</button>
     <button class="send-btn" id="btnSend" aria-label="Send">➤</button>
   </div>
@@ -109,6 +110,14 @@
       <input id="setInterval" type="number" min="8" max="120" value="20">
     </label>
     <label class="check"><input type="checkbox" id="setWakeLock" checked> Keep screen awake while listening</label>
+    <label class="field">Speech engine
+      <select id="setSpeech">
+        <option value="auto">Auto (recommended)</option>
+        <option value="device">Phone's built-in speech recognition (instant)</option>
+        <option value="gemini">Gemini transcription (more accurate, ~15 s delay)</option>
+      </select>
+      <small>On iPhone home-screen apps, Auto uses Gemini because Safari's built-in recognition doesn't work reliably there.</small>
+    </label>
     <div class="dlg-actions">
       <button type="button" id="btnClearData" class="danger">Erase all data</button>
       <span class="spacer"></span>
