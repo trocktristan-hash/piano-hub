@@ -148,6 +148,24 @@
   </form>
 </dialog>
 
+<!-- "Was it in stock?" — waits for the associate to come back from bestbuy.com -->
+<dialog id="checkDlg">
+  <form method="dialog" class="dlg">
+    <h2 id="checkQ">Was it in stock?</h2>
+    <div id="checkItem"></div>
+    <div class="check-answers">
+      <button value="in" class="ans in">✓ Yes, in stock</button>
+      <button value="low" class="ans low">Low stock</button>
+      <button value="out" class="ans out">✗ No, not in stock</button>
+    </div>
+    <div class="dlg-actions">
+      <a id="checkAgain" href="#" target="_blank" rel="noopener">Open bestbuy.com again ↗</a>
+      <span class="spacer"></span>
+      <button value="skip">Didn't check</button>
+    </div>
+  </form>
+</dialog>
+
 <!-- Stock notebook -->
 <dialog id="bookDlg">
   <form method="dialog" class="dlg">

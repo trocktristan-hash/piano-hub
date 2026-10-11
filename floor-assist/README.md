@@ -25,7 +25,9 @@ Best Buy's live stock can't be read without the developer key, so web mode uses 
 2. Each card has a yellow **Check stock on bestbuy.com ↗** button. It opens the bestbuy.com search for that SKU/model,
    or the Best Buy app if it's installed. **Set your "My Store" to Lady Lake once** on bestbuy.com/the app, and the
    results show whether it's available for pickup at your store.
-3. Tap **✓ In / Low / ✗ Out** on the card. That goes into your **stock notebook** (☰ menu or ▥ scanner → 📋).
+3. When you switch back to Floor Assist, a pop-up is waiting: **"Was it in stock at Lady Lake?"** Tap
+   **Yes / Low / No** and it goes into your **stock notebook** (☰ menu or ▥ scanner → 📋). You can also tap
+   ✓ In / Low / ✗ Out on the card at any time, or ↗ on a notebook entry to recheck it.
 4. From then on, searches put verified in-stock items first and **hide anything marked out**. Unchecked items are
    labeled "Not checked yet", and the AI never claims they're in stock. Entries older than 7 days show "recheck".
 5. Fill the notebook fast from the floor:

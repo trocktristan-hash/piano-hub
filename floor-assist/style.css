@@ -207,7 +207,15 @@ fieldset { border: 1px solid var(--border); border-radius: 12px; display: flex; 
 .book-item { display: flex; gap: 6px; align-items: center; padding: 6px 0; border-bottom: 1px solid var(--border); font-size: 13px; }
 .book-item .b-main { flex: 1; min-width: 0; }
 .book-item button { padding: 2px 7px; font-size: 12px; }
+.book-check { padding: 2px 8px; font-size: 14px; text-decoration: none; color: var(--brand-2); border: 1px solid var(--border); border-radius: 10px; }
 .tag-item { display: flex; gap: 8px; align-items: center; font-size: 13px; padding: 4px 0; }
+
+.check-answers { display: flex; flex-direction: column; gap: 8px; }
+.check-answers .ans { padding: 14px; font-size: 17px; font-weight: 600; border-radius: 12px; }
+.ans.in { background: var(--good); border-color: var(--good); color: #fff; }
+.ans.low { color: var(--warn); }
+.ans.out { color: var(--bad); }
+#checkAgain { font-size: 14px; color: var(--brand-2); }
 
 .toast {
   position: fixed; left: 50%; bottom: calc(env(safe-area-inset-bottom) + 96px); transform: translateX(-50%);

@@ -690,6 +690,8 @@ function productCard(p) {
   const skuEl = $('.sku', el);
   if (skuEl) skuEl.onclick = () => copyText(String(isSku(p.sku) ? p.sku : p.model));
   el.querySelectorAll('[data-st]').forEach(b => { b.onclick = () => { StockBook.mark(p, b.dataset.st); refreshStockBadges(); toast('Saved to stock notebook'); }; });
+  const link = $('.check-link', el);
+  if (link) link.addEventListener('click', () => startCheck(p));
   $('[data-act=star]', el).onclick = e => { toggleShortlist(p); e.target.textContent = current.shortlist.some(x => x.sku === p.sku) ? '★ Saved' : '☆ Save'; };
   $('[data-act=ask]', el).onclick = () => { document.querySelectorAll('dialog[open]').forEach(d => d.close()); closeDrawers(); send(`Give me a 20-second pitch for ${idLabel(p) || p.name} (${p.name}) tailored to this customer: 3 selling points in plain language, one honest trade-off, and what to pair with it.`); };
   return el;
@@ -1460,12 +1462,44 @@ function renderBook() {
     d.innerHTML = `<div class="b-main"><div>${esc(e.name || e.model || e.sku)}</div>
       <div class="muted">${esc([e.sku ? 'SKU ' + e.sku : '', e.model ? 'Model ' + e.model : ''].filter(Boolean).join(' · '))}</div>
       <span class="stock ${st.status}">${esc(st.label)}</span></div>
+      <a class="book-check" href="${esc(bbLink(e))}" target="_blank" rel="noopener" title="Check on bestbuy.com">↗</a>
       <button data-st="in">✓</button><button data-st="low">Low</button><button data-st="out">✗</button><button data-del class="danger">🗑</button>`;
+    $('.book-check', d).addEventListener('click', () => startCheck(e));
     d.querySelectorAll('[data-st]').forEach(b => { b.onclick = () => { StockBook.mark(e, b.dataset.st); renderBook(); refreshStockBadges(); }; });
     $('[data-del]', d).onclick = () => { StockBook.remove(e.id); renderBook(); refreshStockBadges(); };
     box.appendChild(d);
   });
 }
+/* "Check stock" opens bestbuy.com; the question is shown right away so it's waiting when the associate switches back.
+   It's also saved, because iOS sometimes reloads home-screen apps after switching away. */
+function startCheck(p) {
+  const item = { sku: p.sku, model: p.model || '', name: p.name || '', price: p.price ?? null };
+  LS.set('fa.pendingCheck', { item, at: Date.now() });
+  setTimeout(() => showCheck(item), 400); // after the browser has started opening the link
+}
+function showCheck(item) {
+  const dlg = $('#checkDlg');
+  if (dlg.open) dlg.close('replaced');
+  dlg.dataset.item = JSON.stringify(item);
+  $('#checkQ').textContent = `Was it in stock at ${settings.store?.name || 'your store'}?`;
+  $('#checkItem').innerHTML = `<strong>${esc(item.name || item.model)}</strong><div class="muted">${esc(idLabel(item))}</div>`;
+  $('#checkAgain').href = bbLink(item);
+  dlg.returnValue = '';
+  dlg.showModal();
+}
+function onCheckAnswered() {
+  const dlg = $('#checkDlg');
+  const ans = dlg.returnValue;
+  if (ans === 'replaced') return;
+  LS.set('fa.pendingCheck', null);
+  if (!['in', 'low', 'out'].includes(ans)) return;
+  const item = JSON.parse(dlg.dataset.item || '{}');
+  StockBook.mark(item, ans, 'bestbuy.com');
+  refreshStockBadges();
+  if ($('#bookDlg').open) renderBook();
+  toast(ans === 'out' ? 'Marked out — it won\'t be suggested' : 'Saved to stock notebook');
+}
+
 function openBook() {
   document.querySelectorAll('dialog[open]').forEach(d => d.close());
   closeDrawers();
@@ -1596,6 +1630,10 @@ function init() {
   $('#scanInput').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); lookupCode(e.target.value); } });
 
   if (!settings.store && source() === 'web') { settings.store = webStore('Lady Lake'); saveSettings(); }
+  $('#checkDlg').addEventListener('close', onCheckAnswered);
+  $('#checkAgain').addEventListener('click', () => LS.set('fa.pendingCheck', { item: JSON.parse($('#checkDlg').dataset.item || '{}'), at: Date.now() }));
+  const pendingCheck = LS.get('fa.pendingCheck', null);
+  if (pendingCheck?.item && Date.now() - pendingCheck.at < 20 * 60 * 1000) setTimeout(() => showCheck(pendingCheck.item), 300);
   if (window.visualViewport) { visualViewport.addEventListener('resize', fitViewport); fitViewport(); }
   if (IS_IOS && !IS_STANDALONE && !LS.get('fa.iosTip', false)) {
     LS.set('fa.iosTip', true);
