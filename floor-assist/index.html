@@ -64,6 +64,7 @@
 <aside id="sessionsDrawer" class="drawer left" hidden>
   <div class="drawer-head"><strong>Customers</strong><button class="icon-btn" data-close>✕</button></div>
   <button class="primary wide" id="btnNewSession">+ New customer</button>
+  <button class="wide" id="btnBook">📋 Stock notebook</button>
   <div id="sessionList" class="session-list"></div>
   <label class="field">Notes for this customer
     <textarea id="sessionNotes" rows="4" placeholder="Name, budget, what they already own, follow-up date…"></textarea>
@@ -92,9 +93,9 @@
       <div class="row"><input id="setModel" list="modelList" placeholder="gemini-2.5-flash"><button type="button" id="btnLoadModels">Load list</button></div>
       <datalist id="modelList"></datalist>
     </label>
-    <label class="field">Best Buy API key
-      <input id="setBB" type="password" autocomplete="off" placeholder="from developer.bestbuy.com">
-      <small>Free key from developer.bestbuy.com. Used for product search &amp; store stock.</small>
+    <label class="field">Best Buy API key (optional)
+      <input id="setBB" type="password" autocomplete="off" placeholder="leave blank to use web mode">
+      <small>With a key from developer.bestbuy.com, stock is checked automatically. Without one, the app uses web search + your stock notebook (tap ✓/✗ after checking bestbuy.com).</small>
     </label>
     <label class="check"><input type="checkbox" id="setDemo"> Demo inventory (try the app without a Best Buy key)</label>
     <fieldset>
@@ -137,7 +138,27 @@
       <button type="button" id="btnScanLookup" class="primary">Look up</button>
     </div>
     <div id="scanResult"></div>
+    <div class="row">
+      <button type="button" id="btnTags">📸 Read shelf tags</button>
+      <button type="button" id="btnOpenBook">📋 Stock notebook</button>
+    </div>
+    <div id="tagResult"></div>
+    <input type="file" id="tagInput" accept="image/*" hidden>
     <div class="dlg-actions"><span class="spacer"></span><button value="close">Close</button></div>
+  </form>
+</dialog>
+
+<!-- Stock notebook -->
+<dialog id="bookDlg">
+  <form method="dialog" class="dlg">
+    <h2>Stock notebook</h2>
+    <p class="muted">What you've checked at your store. Web mode uses this to show in-stock items first and hide ones marked out. Entries older than 7 days count as "recheck".</p>
+    <input id="bookFilter" type="search" placeholder="Filter…">
+    <div id="bookList" class="book-list"></div>
+    <div class="dlg-actions">
+      <button type="button" id="btnBookPrune">Remove entries older than 7 days</button>
+      <span class="spacer"></span><button value="close" class="primary">Close</button>
+    </div>
   </form>
 </dialog>
 

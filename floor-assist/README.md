@@ -8,14 +8,32 @@ No build step and no server: plain HTML/JS. Keys, customers and history are stor
 ## Setup (5 minutes)
 
 1. **Gemini API key**: free at <https://aistudio.google.com/apikey>.
-2. **Best Buy API key**: free at <https://developer.bestbuy.com> (sign up, then copy the key from your dashboard).
-   This is Best Buy's public Products/Stores API: catalog, prices, and store pickup availability.
-   It is *not* the internal inventory system, so stock is what bestbuy.com shows for in-store pickup.
+2. **Best Buy API key (optional)**: from <https://developer.bestbuy.com>. Best Buy only accepts business email
+   addresses for this. With a key, store stock is checked automatically. **Without one, the app runs in web mode**
+   (see below).
 3. Open the app, then tap **⚙ Settings** and:
    - paste both keys
    - tap **Find stores** (ZIP is pre-filled with 32159, Lady Lake FL) and pick your store
    - optional: tap **Load list** to choose a different Gemini model (default `gemini-2.5-flash`)
-4. No Best Buy key yet? Turn on **Demo inventory** to try everything with sample products.
+4. Want to try it with sample data? Turn on **Demo inventory**.
+
+### Web mode (no Best Buy API key)
+
+Best Buy's live stock can't be read without the developer key, so web mode uses what you can check yourself:
+
+1. **Products** come from Gemini + Google Search (real Best Buy listings, model numbers, approximate prices).
+2. Each card has a yellow **Check stock on bestbuy.com ↗** button. It opens the bestbuy.com search for that SKU/model,
+   or the Best Buy app if it's installed. **Set your "My Store" to Lady Lake once** on bestbuy.com/the app, and the
+   results show whether it's available for pickup at your store.
+3. Tap **✓ In / Low / ✗ Out** on the card. That goes into your **stock notebook** (☰ menu or ▥ scanner → 📋).
+4. From then on, searches put verified in-stock items first and **hide anything marked out**. Unchecked items are
+   labeled "Not checked yet", and the AI never claims they're in stock. Entries older than 7 days show "recheck".
+5. Fill the notebook fast from the floor:
+   - ▥ **Scan a box barcode**, then tap **"It's here on the floor — mark in stock"**.
+   - ▥ → **📸 Read shelf tags**: photograph a row of shelf tags or boxes. Gemini reads the names/SKUs/prices,
+     and you mark them all in stock in one tap.
+
+The notebook is saved on your phone and builds up over time, so the more you use it, the better the filtering gets.
 
 ### Hosting it so it opens on your phone
 
@@ -49,7 +67,7 @@ For local testing: `cd floor-assist && python3 -m http.server 8000`, then open <
 | | |
 |---|---|
 | **Describe the need** | e.g. "grandma wants a tablet for video calls, under $250". The AI runs inventory searches, checks stock, and answers with top picks, questions to ask, and add-ons. |
-| **Stock filter** | *My store only* (default), *Nearby stores* (radius set in Settings), or *Anything*. Each product card shows a stock badge: In stock / Low stock / Not here (nearest store). |
+| **Stock filter** | *My store only* (default), *Nearby stores* (radius set in Settings), or *Anything*. Each product card shows a stock badge: In stock / Low stock / Not here (nearest store). In web mode, the badge comes from your stock notebook. |
 | **Photos** | 📷 attach up to 4: a model-number sticker, a broken cable, a TV wall, a screenshot the customer shows you. You can also paste images. |
 | **Listening mode** | 🎙 transcribes the conversation live and, every ~20 s (configurable) when there's new talk, pops up a short tip: their need, the next question to ask, in-stock picks, and an add-on. Tap **Suggest now** for an instant tip, or **Move to chat** to keep going in the chat. Uses the browser's speech recognition, falling back to Gemini audio transcription. Keeps the screen awake. |
 | **Budget box** | Type a max $ in the top bar and every search is capped at it. |
@@ -66,7 +84,9 @@ For local testing: `cd floor-assist && python3 -m http.server 8000`, then open <
 
 - **Tell customers** when listening mode is on, and follow store/company policy on recording and on using outside AI tools.
   Avoid putting customer personal info (phone, address, payment) into the chat.
-- Stock comes from Best Buy's public store-pickup availability, refreshed every 10 minutes per item. Floor/backroom counts
+- With an API key, stock comes from Best Buy's public store-pickup availability, refreshed every 10 minutes per item.
+  In web mode, stock is only as current as your notebook; web prices are approximate (shown as "~$").
+- Web mode uses Gemini's Google Search grounding, which has its own daily free limit on your Gemini key. Floor/backroom counts
   and open-box units aren't exposed by the public API.
 - Best Buy's free API allows about 5 requests/second. The app paces itself and checks stock for up to 24 search results per query.
 - Live speech recognition is instant in Chrome and the Safari tab. Home-screen iPhone apps and other browsers use Gemini transcription (~15 s delay).

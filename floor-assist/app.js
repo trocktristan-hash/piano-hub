@@ -190,14 +190,131 @@ async function stockFor(sku) {
   return { status: 'none', label: 'Not in stock nearby', nearby: [] };
 }
 
+/* Where products come from: Best Buy API (key), demo data, or web search + the associate's stock notebook. */
+const source = () => (settings.demo ? 'demo' : settings.bbKey ? 'api' : 'web');
+
 function effectiveMode() {
-  if (settings.stockMode === 'store' && !settings.store) return 'nearby';
+  if (source() === 'web') return settings.stockMode === 'any' ? 'any' : 'store';
+  if (settings.stockMode === 'store' && !settings.store?.id) return 'nearby'; // API mode needs a real store id
   return settings.stockMode;
+}
+
+const normId = s => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+const isSku = s => /^\d{6,8}$/.test(String(s ?? ''));
+const idLabel = p => (isSku(p.sku) ? `SKU ${p.sku}` : p.model ? `Model ${p.model}` : '');
+function ago(t) {
+  const m = Math.round((Date.now() - t) / 60000);
+  if (m < 1) return 'just now';
+  if (m < 60) return `${m}m ago`;
+  if (m < 1440) return `${Math.round(m / 60)}h ago`;
+  return `${Math.round(m / 1440)}d ago`;
+}
+// bestbuy.com search for the SKU/model; shows pickup availability for the store set as "My Store" (and opens the Best Buy app if installed).
+const bbLink = p => `https://www.bestbuy.com/site/searchpage.jsp?st=${encodeURIComponent(isSku(p.sku) ? p.sku : p.model || p.name)}`;
+
+/* Stock notebook: what the associate has verified (bestbuy.com / app / on the floor). Used for stock in web mode. */
+const STOCK_FRESH_MS = 7 * 24 * 3600 * 1000;
+const StockBook = {
+  items: LS.get('fa.stockbook', []), // { id, sku, model, name, price, status: 'in'|'low'|'out', at, src }
+  save() { LS.set('fa.stockbook', this.items.slice(0, 2000)); },
+  find(p) {
+    const sku = isSku(p.sku) ? String(p.sku) : null;
+    const model = normId(p.model), name = normId(p.name);
+    return this.items.find(e => (sku && e.sku === sku) || (model.length >= 4 && normId(e.model) === model) || (name && normId(e.name) === name));
+  },
+  mark(p, status, src = 'manual') {
+    let e = this.find(p);
+    if (e) this.items.splice(this.items.indexOf(e), 1); else e = { id: uid() };
+    Object.assign(e, {
+      sku: isSku(p.sku) ? String(p.sku) : e.sku || null, model: p.model || e.model || '', name: p.name || e.name || '',
+      price: p.price ?? e.price ?? null, status, at: Date.now(), src,
+    });
+    this.items.unshift(e);
+    this.save();
+    return e;
+  },
+  remove(id) { this.items = this.items.filter(e => e.id !== id); this.save(); },
+  stock(p) {
+    const e = this.find(p);
+    if (!e) return { status: 'unk', label: 'Not checked yet' };
+    const word = { in: 'In stock', low: 'Low stock', out: 'Out of stock' }[e.status];
+    if (Date.now() - e.at > STOCK_FRESH_MS) return { status: 'unk', label: `${word} ${ago(e.at)} — recheck` };
+    return { status: e.status === 'out' ? 'none' : e.status, label: `${word} · ${ago(e.at)}` };
+  },
+};
+
+const textOf = r => (r.candidates?.[0]?.content?.parts || []).filter(p => p.text && !p.thought).map(p => p.text).join('').trim();
+function parseJSON(t, wantArray = true) {
+  const m = String(t).match(wantArray ? /\[[\s\S]*\]/ : /\{[\s\S]*\}/);
+  if (!m) return wantArray ? [] : null;
+  try { return JSON.parse(m[0]); } catch { return wantArray ? [] : null; }
+}
+
+/* Web mode: Gemini with Google Search finds real Best Buy products (no Best Buy API key needed). */
+const Web = {
+  async ask(text, { grounded = true, image } = {}) {
+    const parts = image ? [{ inlineData: image }, { text }] : [{ text }];
+    const r = await gemini({
+      contents: [{ role: 'user', parts }],
+      ...(grounded ? { tools: [{ google_search: {} }] } : {}),
+      generationConfig: { temperature: 0.2 },
+    });
+    return textOf(r);
+  },
+  product(x) {
+    const digits = String(x.sku ?? '').replace(/\D/g, '');
+    const p = {
+      name: String(x.name || '').trim(), brand: x.brand || '', model: String(x.model || '').trim(),
+      price: Number(String(x.price ?? '').replace(/[^0-9.]/g, '')) || null,
+      summary: String(x.summary || '').slice(0, 200), image: '', web: true,
+    };
+    p.sku = isSku(digits) ? Number(digits) : 'w' + normId(p.model || p.name).slice(0, 30);
+    p.url = bbLink(p);
+    return p;
+  },
+  async search({ query, min_price, max_price }, n = 8) {
+    const price = [min_price && `at least $${min_price}`, max_price && `at most $${max_price}`].filter(Boolean).join(' and ');
+    const t = await this.ask(`Search bestbuy.com for products currently sold by Best Buy that match: "${query}"${price ? ` priced ${price}` : ''}.
+Return ONLY a JSON array (no other text) of up to ${n} items, best matches first:
+[{"name": "...", "brand": "...", "model": "manufacturer model number", "sku": "7-digit Best Buy SKU or null if you are not certain", "price": current Best Buy price as a number or null, "summary": "one short line"}]
+Use real Best Buy listings only. Never guess a SKU.`);
+    return parseJSON(t).filter(x => x && x.name).map(x => this.product(x))
+      .filter(p => !max_price || !p.price || p.price <= max_price * 1.05);
+  },
+  async details(p) {
+    return this.ask(`Using bestbuy.com and the manufacturer's site, give the key specs and features of: ${p.name}${p.model ? ` (model ${p.model})` : ''}${isSku(p.sku) ? ` (Best Buy SKU ${p.sku})` : ''}. Plain bullet list, max 15 bullets, include what's in the box and the current Best Buy price if listed.`);
+  },
+  async identify(code) {
+    const t = await this.ask(`What product has ${code.length >= 11 ? 'UPC/EAN barcode' : 'Best Buy SKU'} ${code}? Search the web (bestbuy.com preferred).
+Return ONLY JSON: {"name": "...", "brand": "...", "model": "...", "sku": "Best Buy SKU or null", "price": number or null, "summary": "one line"}. If you can't find it, return {}.`);
+    const x = parseJSON(t, false);
+    if (!x?.name) return null;
+    if (code.length < 11 && !x.sku) x.sku = code;
+    return this.product(x);
+  },
+  async readTags(image) {
+    const t = await this.ask(`This photo was taken inside a Best Buy store: shelf tags, price labels, product boxes or a display. List every distinct product you can actually read.
+Return ONLY a JSON array: [{"name": "...", "brand": "...", "model": "model number if visible", "sku": "Best Buy SKU digits if visible", "price": number or null}]. Don't invent anything you can't read.`, { grounded: false, image });
+    return parseJSON(t).filter(x => x && x.name).map(x => this.product(x));
+  },
+};
+
+function effectiveModeLabel() {
+  const mode = effectiveMode();
+  if (source() === 'web') return mode === 'any' ? 'no stock filter (web mode)' : 'web mode: stock is from the associate\'s stock notebook; items marked out are hidden, "Not checked yet" = unverified';
+  return mode === 'store' ? `in stock at ${settings.store.name}` : mode === 'nearby' ? `in stock within ${settings.radius} mi of ${areaZip()}` : 'no stock filter';
 }
 
 /* Walk the search results in order, checking stock, until we have `want` matches. */
 async function filterByStock(products, want) {
   const mode = effectiveMode();
+  if (source() === 'web') {
+    let list = products.map(p => ({ ...p, stock: StockBook.stock(p) }));
+    if (mode !== 'any') list = list.filter(p => p.stock.status !== 'none');
+    const rank = s => ({ in: 0, low: 1 }[s] ?? 2);
+    list.sort((a, b) => rank(a.stock.status) - rank(b.stock.status)); // verified in-stock first, relevance otherwise
+    return { results: list.slice(0, want), checked: products.length };
+  }
   const out = [];
   let checked = 0;
   const maxChecks = mode === 'any' ? want : 24;
@@ -288,12 +405,20 @@ const Demo = (() => {
 
 // Unified product access (real API or demo)
 const Inventory = {
-  async search(args, pageSize) { return settings.demo ? Demo.search(args) : bbSearch(args, pageSize); },
+  async search(args, pageSize) {
+    if (settings.demo) return Demo.search(args);
+    return settings.bbKey ? bbSearch(args, pageSize) : Web.search(args);
+  },
   async details(sku) {
     if (settings.demo) { const p = Demo.bySku(sku); return p ? Demo.details(p) : null; }
     return bbBySku(sku);
   },
   async upc(code) { return settings.demo ? null : bbByUpc(code); },
+  async lookup(code) {
+    if (source() === 'web') return Web.identify(code);
+    let p = code.length >= 11 ? await this.upc(code) : null;
+    return p || this.details(code);
+  },
 };
 
 // ---------- Gemini ----------
@@ -334,19 +459,19 @@ const TOOL_DECLS = [{
     },
     {
       name: 'get_product_details',
-      description: 'Get full description, features and specs for one SKU. Use before making specific spec claims or comparisons.',
-      parameters: { type: 'object', properties: { sku: { type: 'integer' } }, required: ['sku'] },
+      description: 'Get full description, features and specs for one product. Use before making specific spec claims or comparisons.',
+      parameters: { type: 'object', properties: { sku: { type: 'string', description: 'Best Buy SKU, or the model number if there is no SKU.' } }, required: ['sku'] },
     },
     {
       name: 'check_stock',
-      description: 'Check store stock for specific SKUs (e.g. ones the customer mentions or saw online).',
-      parameters: { type: 'object', properties: { skus: { type: 'array', items: { type: 'integer' } } }, required: ['skus'] },
+      description: 'Check store stock for specific products (e.g. ones the customer mentions or saw online).',
+      parameters: { type: 'object', properties: { skus: { type: 'array', items: { type: 'string' }, description: 'Best Buy SKUs (or model numbers if no SKU).' } }, required: ['skus'] },
     },
   ],
 }];
 
 const compact = p => ({
-  sku: p.sku, name: p.name, price: p.price, regular_price: p.onSale ? p.regularPrice : undefined,
+  sku: isSku(p.sku) ? p.sku : undefined, model: p.model || undefined, name: p.name, price: p.price, regular_price: p.onSale ? p.regularPrice : undefined,
   rating: p.rating, reviews: p.reviews, brand: p.brand, category: p.category, summary: p.summary || undefined,
   stock: p.stock?.label,
 });
@@ -362,22 +487,27 @@ const TOOLS = {
     if (!raw.length) return { results: [], note: 'No catalog matches. Try simpler or different keywords.' };
     onStatus?.(`Checking stock for “${a.query}”…`);
     const { results, checked } = await filterByStock(raw, limit);
-    results.forEach(p => found.set(p.sku, p));
-    const mode = effectiveMode();
+    results.forEach(p => found.set(String(p.sku), p));
     return {
-      stock_filter: mode === 'store' ? `in stock at ${settings.store.name}` : mode === 'nearby' ? `in stock within ${settings.radius} mi of ${areaZip()}` : 'no stock filter',
+      stock_filter: effectiveModeLabel(),
       results: results.map(compact),
       note: results.length ? undefined : `${raw.length} catalog matches but none in stock (checked ${checked}). Try a different query, a higher budget, or suggest nearby/online.`,
     };
   },
   async get_product_details({ sku }, found, onStatus) {
-    onStatus?.(`Reading specs for SKU ${sku}…`);
+    onStatus?.(`Reading specs for ${sku}…`);
+    if (source() === 'web') {
+      const key = normId(sku);
+      let p = [...found.values()].find(x => String(x.sku) === String(sku) || normId(x.model) === key);
+      if (!p) { p = Web.product({ name: String(sku), model: isSku(sku) ? '' : String(sku), sku: isSku(sku) ? sku : null }); }
+      return { ...compact({ ...p, stock: StockBook.stock(p) }), details: await Web.details(p) };
+    }
     const p = await Inventory.details(sku);
     if (!p) return { error: 'SKU not found' };
     const r = p.raw || {};
-    if (!found.has(p.sku)) {
+    if (!found.has(String(p.sku))) {
       try { p.stock = await stockFor(p.sku); } catch {}
-      found.set(p.sku, p);
+      found.set(String(p.sku), p);
     }
     return {
       ...compact(p),
@@ -392,12 +522,21 @@ const TOOLS = {
   async check_stock({ skus }, found, onStatus) {
     onStatus?.('Checking stock…');
     const out = [];
+    if (source() === 'web') {
+      for (const id of (skus || []).slice(0, 8)) {
+        const key = normId(id);
+        const p = [...found.values()].find(x => String(x.sku) === String(id) || normId(x.model) === key)
+          || { sku: isSku(id) ? Number(id) : null, model: isSku(id) ? '' : String(id), name: '' };
+        out.push({ product: id, stock: StockBook.stock(p).label });
+      }
+      return { results: out, note: 'Web mode: "Not checked yet" means the associate should tap Check stock on the card (bestbuy.com) and mark it.' };
+    }
     for (const sku of (skus || []).slice(0, 8)) {
       try {
         const stock = await stockFor(sku);
         out.push({ sku, stock: stock.label, other_stores: stock.nearby.slice(0, 4) });
-        const p = found.get(sku) || await Inventory.details(sku).catch(() => null);
-        if (p) found.set(p.sku, { ...p, stock });
+        const p = found.get(String(sku)) || await Inventory.details(sku).catch(() => null);
+        if (p) found.set(String(p.sku), { ...p, stock });
       } catch (e) { out.push({ sku, error: e.message }); }
     }
     return { results: out };
@@ -406,8 +545,10 @@ const TOOLS = {
 
 function systemPrompt(extra = '') {
   const mode = effectiveMode();
-  const store = settings.store ? `${settings.store.name} (${settings.store.city}, ${settings.store.region}), store #${settings.store.id}` : `ZIP ${areaZip()}`;
-  const stockRule = mode === 'store' ? `Only recommend products the tools report as in stock at ${store}.`
+  const store = settings.store ? `${settings.store.name} (${settings.store.city}, ${settings.store.region})${settings.store.id ? `, store #${settings.store.id}` : ''}` : `ZIP ${areaZip()}`;
+  const stockRule = source() === 'web'
+    ? `There is NO live inventory feed. Products come from web search; each result's stock comes from the associate's own stock notebook (things they verified on bestbuy.com, the Best Buy app, or on the floor). Recommend items marked In stock first. Items "Not checked yet" may be suggested, but say they need a quick stock check (the Check stock button on the card). Never claim something is in stock unless its stock status says so. Prices come from the web: say "about $X".`
+    : mode === 'store' ? `Only recommend products the tools report as in stock at ${store}.`
     : mode === 'nearby' ? `Prefer items in stock at the associate's store; nearby-store stock (within ${settings.radius} mi) is acceptable but say so.`
     : 'Stock filter is off; still mention stock status when known.';
   return `You are "Floor Assist", a fast, practical sidekick for a Best Buy sales associate working the floor at ${store}. Today is ${new Date().toDateString()}.
@@ -423,7 +564,7 @@ ${settings.budget ? `- The customer's budget is ${money(settings.budget)} (alrea
 
 Format:
 **Need:** one line.
-**Top picks:** 2-4 bullets: **Short name** (SKU 1234567) – $price – why it fits (one line). Mark one as the best fit.
+**Top picks:** 2-4 bullets: **Short name** (SKU 1234567, or the model number if there's no SKU) – $price – why it fits (one line). Mark one as the best fit.
 **Ask:** 1-2 questions to narrow it down (skip if clear).
 **Add-ons:** 1-3 relevant accessories you actually found in stock (cables, mounts, cases, chargers, soundbar, etc.), plus a reminder to offer protection/membership when it fits — don't quote plan prices.
 ${current?.notes ? `\nAssociate's notes about this customer: ${current.notes}` : ''}
@@ -485,16 +626,16 @@ async function runAgent(history, { extra = '', onStatus } = {}) {
 
 /* Pick product cards to show: ones mentioned by SKU in the answer (in that order), else the top found. */
 function cardsFor(text, products) {
-  const bySku = new Map(products.map(p => [String(p.sku), p]));
-  const seen = [];
-  for (const m of String(text).matchAll(/\b(\d{6,8})\b/g)) {
-    const p = bySku.get(m[1]);
-    if (p && !seen.includes(p)) seen.push(p);
-  }
+  const t = String(text).toLowerCase();
+  const pos = p => {
+    const hits = [isSku(p.sku) ? t.indexOf(String(p.sku)) : -1, p.model && p.model.length >= 4 ? t.indexOf(p.model.toLowerCase()) : -1].filter(i => i >= 0);
+    return hits.length ? Math.min(...hits) : -1;
+  };
+  const seen = products.map(p => [pos(p), p]).filter(([i]) => i >= 0).sort((a, b) => a[0] - b[0]).map(([, p]) => p);
   return (seen.length ? seen : products.slice(0, 6)).map(slimProduct);
 }
 const slimProduct = p => ({
-  sku: p.sku, name: p.name, price: p.price, regularPrice: p.regularPrice, onSale: p.onSale, image: p.image, url: p.url,
+  sku: p.sku, web: p.web || undefined, name: p.name, price: p.price, regularPrice: p.regularPrice, onSale: p.onSale, image: p.image, url: p.url,
   rating: p.rating, reviews: p.reviews, brand: p.brand, model: p.model, category: p.category, stock: p.stock,
 });
 
@@ -525,27 +666,53 @@ const chatEl = $('#chat');
 function productCard(p) {
   const el = document.createElement('div');
   el.className = 'card';
-  const st = p.stock || { status: 'unk', label: 'Stock unknown' };
+  el.dataset.pid = String(p.sku);
+  const st = p.web ? StockBook.stock(p) : p.stock || { status: 'unk', label: 'Stock unknown' };
   const inList = current.shortlist.some(x => x.sku === p.sku);
   el.innerHTML = `
     ${p.image ? `<img src="${esc(p.image)}" alt="" loading="lazy">` : ''}
     <span class="stock ${esc(st.status)}">${esc(st.label)}</span>
     <div class="name">${esc(p.name)}</div>
-    <div class="price">${money(p.price)}${p.onSale ? `<span class="was">${money(p.regularPrice)}</span>` : ''}</div>
+    <div class="price">${p.web ? (p.price ? `~${money(p.price)}` : '<span class="muted">Price: check</span>') : money(p.price)}${p.onSale ? `<span class="was">${money(p.regularPrice)}</span>` : ''}</div>
     <div class="meta">
-      <span class="sku" title="Tap to copy">SKU ${esc(p.sku)}</span>
+      ${idLabel(p) ? `<span class="sku" title="Tap to copy">${esc(idLabel(p))}</span>` : ''}
       ${p.rating ? `<span>★ ${Number(p.rating).toFixed(1)} (${Number(p.reviews || 0).toLocaleString()})</span>` : ''}
     </div>
     <div class="actions">
       <button data-act="star">${inList ? '★ Saved' : '☆ Save'}</button>
       <button data-act="ask">Pitch</button>
-      <a href="${esc(p.url)}" target="_blank" rel="noopener">Page</a>
-    </div>`;
-  $('.sku', el).onclick = () => copyText(String(p.sku));
+      ${p.web ? '' : `<a href="${esc(p.url)}" target="_blank" rel="noopener">Page</a>`}
+    </div>
+    ${p.web ? `<a class="check-link" href="${esc(bbLink(p))}" target="_blank" rel="noopener">Check stock on bestbuy.com ↗</a>
+    <div class="actions stock-actions">
+      <button data-st="in">✓ In</button><button data-st="low">Low</button><button data-st="out">✗ Out</button>
+    </div>` : ''}`;
+  const skuEl = $('.sku', el);
+  if (skuEl) skuEl.onclick = () => copyText(String(isSku(p.sku) ? p.sku : p.model));
+  el.querySelectorAll('[data-st]').forEach(b => { b.onclick = () => { StockBook.mark(p, b.dataset.st); refreshStockBadges(); toast('Saved to stock notebook'); }; });
   $('[data-act=star]', el).onclick = e => { toggleShortlist(p); e.target.textContent = current.shortlist.some(x => x.sku === p.sku) ? '★ Saved' : '☆ Save'; };
-  $('[data-act=ask]', el).onclick = () => { document.querySelectorAll('dialog[open]').forEach(d => d.close()); closeDrawers(); send(`Give me a 20-second pitch for SKU ${p.sku} (${p.name}) tailored to this customer: 3 selling points in plain language, one honest trade-off, and what to pair with it.`); };
+  $('[data-act=ask]', el).onclick = () => { document.querySelectorAll('dialog[open]').forEach(d => d.close()); closeDrawers(); send(`Give me a 20-second pitch for ${idLabel(p) || p.name} (${p.name}) tailored to this customer: 3 selling points in plain language, one honest trade-off, and what to pair with it.`); };
   return el;
 }
+
+/* Re-draw stock badges on web-mode cards after the notebook changes. */
+function refreshStockBadges() {
+  document.querySelectorAll('.card[data-pid]').forEach(el => {
+    const p = findShownProduct(el.dataset.pid);
+    if (!p?.web) return;
+    const st = StockBook.stock(p);
+    const b = $('.stock', el);
+    b.className = 'stock ' + st.status; b.textContent = st.label;
+  });
+}
+function findShownProduct(pid) {
+  for (const m of [...current.messages, ...current.tips, { products: current.shortlist }, { products: lastLookup ? [lastLookup] : [] }]) {
+    const p = (m.products || []).find(x => String(x.sku) === pid);
+    if (p) return p;
+  }
+  return null;
+}
+let lastLookup = null;
 
 function renderMessage(m) {
   if (m.role === 'user') {
@@ -583,11 +750,13 @@ function renderMessage(m) {
 function renderWelcome() {
   const missing = [];
   if (!settings.geminiKey) missing.push('your <strong>Gemini API key</strong>');
-  if (!settings.bbKey && !settings.demo) missing.push('a <strong>Best Buy API key</strong> (or turn on Demo inventory)');
   if (!settings.store) missing.push('your <strong>store</strong>');
+  const webNote = source() === 'web'
+    ? `<p>🔎 <strong>No Best Buy API key:</strong> products come from web search. Tap <em>Check stock</em> on a card to see your store's pickup availability on bestbuy.com, then tap ✓ In / ✗ Out — the app remembers it and shows verified in-stock items first. Snap shelf tags (▥ → 📸) to add what's on the floor.</p>` : '';
   chatEl.innerHTML = `<div class="welcome">
     <h2>What does the customer need?</h2>
     ${missing.length ? `<p>⚙ Setup: add ${missing.join(', ')} in Settings.</p>` : ''}
+    ${webNote}
     <ul>
       <li>Type it like you'd say it: <em>"mom wants a laptop for email and photos, under $600"</em></li>
       <li>📷 Attach a photo — their old TV's model sticker, a cable, a room</li>
@@ -607,7 +776,7 @@ function renderChat() {
 function renderHeader() {
   $('#sessionName').textContent = current.name;
   const s = settings.store;
-  $('#storeLine').textContent = (settings.demo ? 'DEMO · ' : '') + (s ? `${s.name} #${s.id}` : 'No store set — tap ⚙');
+  $('#storeLine').textContent = (settings.demo ? 'DEMO · ' : source() === 'web' ? 'Web + stock notebook · ' : '') + (s ? `${s.name}${s.id ? ' #' + s.id : ''}` : 'No store set — tap ⚙');
   const n = current.shortlist.length;
   $('#shortlistCount').hidden = !n;
   $('#shortlistCount').textContent = n;
@@ -964,11 +1133,11 @@ function renderShortlist() {
     d.className = 'sl-item';
     d.innerHTML = `<input type="checkbox" ${compareSel.has(p.sku) ? 'checked' : ''} aria-label="Select to compare">
       ${p.image ? `<img src="${esc(p.image)}" alt="">` : ''}
-      <div class="sl-main"><div>${esc(p.name)}</div><div class="muted">${money(p.price)} · SKU ${esc(p.sku)} · ${esc(p.stock?.label || '')}</div></div>
+      <div class="sl-main"><div>${esc(p.name)}</div><div class="muted">${money(p.price)} · ${esc(idLabel(p))} · ${esc((p.web ? StockBook.stock(p) : p.stock)?.label || '')}</div></div>
       <button aria-label="Remove">✕</button>`;
     $('input', d).onchange = e => { e.target.checked ? compareSel.add(p.sku) : compareSel.delete(p.sku); };
     $('button', d).onclick = () => { compareSel.delete(p.sku); toggleShortlist(p); };
-    $('.sl-main', d).onclick = () => copyText(String(p.sku));
+    $('.sl-main', d).onclick = () => copyText(String(isSku(p.sku) ? p.sku : p.model || p.name));
     box.appendChild(d);
   });
 }
@@ -984,6 +1153,7 @@ async function openCompare() {
   $('#compareTable').innerHTML = '<div class="status"><span class="spinner"></span>Loading specs…</div>';
   $('#compareDlg').showModal();
   compareData = await Promise.all(items.map(async p => {
+    if (p.web) return { ...p, stock: StockBook.stock(p), raw: {} };
     const d = await Inventory.details(p.sku).catch(() => null);
     let stock = p.stock;
     try { stock = await stockFor(p.sku); } catch {}
@@ -1001,7 +1171,7 @@ async function openCompare() {
     ${row('Stock', p => esc(p.stock?.label || '—'))}
     ${row('Rating', p => (p.rating ? `★ ${Number(p.rating).toFixed(1)} (${p.reviews})` : '—'))}
     ${row('Brand / model', p => esc([p.brand, p.model].filter(Boolean).join(' ')))}
-    ${row('SKU', p => esc(p.sku))}
+    ${row('SKU / model', p => esc(idLabel(p)))}
     ${common.map(n => row(n, p => esc(spec(p, n)))).join('')}
     ${row('Highlights', p => `<ul>${(p.raw.features || []).slice(0, 4).map(f => `<li>${esc(String(f.feature).slice(0, 140))}</li>`).join('')}</ul>`)}
   </table>`;
@@ -1012,7 +1182,7 @@ async function compareAI() {
   $('#compareAI').innerHTML = '<div class="status"><span class="spinner"></span>Comparing…</div>';
   const recent = current.messages.filter(m => m.role === 'user').slice(-4).map(m => m.text).join(' | ');
   const data = compareData.map(p => ({
-    sku: p.sku, name: p.name, price: p.price, rating: p.rating, stock: p.stock?.label,
+    sku: isSku(p.sku) ? p.sku : undefined, model: p.model, name: p.name, price: p.price, rating: p.rating, stock: p.stock?.label,
     features: (p.raw.features || []).slice(0, 6).map(f => f.feature),
     specs: Object.fromEntries((p.raw.details || []).slice(0, 25).map(d => [d.name, d.value])),
   }));
@@ -1021,10 +1191,11 @@ async function compareAI() {
       contents: [{ role: 'user', parts: [{ text: `I'm a Best Buy associate. Compare these products for my customer and tell me which to recommend.
 What the customer said / needs: ${recent || '(not specified)'}${current.notes ? `\nNotes: ${current.notes}` : ''}
 Products (JSON): ${JSON.stringify(data)}
-Answer in under 150 words: **Pick:** which one and why, then one line per product on who it's best for, then the single biggest difference to explain to the customer in plain language.` }] }],
+${compareData.some(p => p.web) ? 'Look up the specs on the web as needed. ' : ''}Answer in under 150 words: **Pick:** which one and why, then one line per product on who it's best for, then the single biggest difference to explain to the customer in plain language.` }] }],
+      ...(compareData.some(p => p.web) ? { tools: [{ google_search: {} }] } : {}),
       generationConfig: { temperature: 0.3 },
     });
-    const t = (r.candidates?.[0]?.content?.parts || []).filter(p => p.text && !p.thought).map(p => p.text).join('');
+    const t = textOf(r);
     $('#compareAI').innerHTML = `<div class="msg assistant">${md(t)}</div>`;
   } catch (e) { $('#compareAI').innerHTML = `<div class="msg error">${esc(e.message)}</div>`; }
   btn.disabled = false;
@@ -1033,7 +1204,7 @@ Answer in under 150 words: **Pick:** which one and why, then one line per produc
 async function shareShortlist() {
   if (!current.shortlist.length) return toast('Shortlist is empty');
   const store = settings.store ? ` at Best Buy ${settings.store.city}` : '';
-  const text = `Products we looked at${store}:\n\n` + current.shortlist.map(p => `• ${p.name}\n  ${money(p.price)} · SKU ${p.sku}\n  ${p.url}`).join('\n\n');
+  const text = `Products we looked at${store}:\n\n` + current.shortlist.map(p => `• ${p.name}\n  ${p.price ? money(p.price) + ' · ' : ''}${idLabel(p)}\n  ${p.url}`).join('\n\n');
   if (navigator.share) { try { await navigator.share({ title: 'Your product list', text }); return; } catch (e) { if (e.name === 'AbortError') return; } }
   copyText(text);
 }
@@ -1100,6 +1271,11 @@ async function findStores() {
   const box = $('#storeResults');
   settings.zip = $('#setZip').value.trim() || '32159';
   saveSettings();
+  if (source() === 'web') {
+    const name = prompt('Store name (city)', settings.zip === '32159' ? 'Lady Lake' : (settings.store?.city || ''));
+    if (name) pickStore(webStore(name.trim()));
+    return;
+  }
   if (settings.demo) {
     box.innerHTML = '';
     const b = document.createElement('button');
@@ -1121,6 +1297,7 @@ async function findStores() {
     });
   } catch (e) { box.innerHTML = `<span class="muted" style="color:var(--bad)">${esc(e.message)}</span>`; }
 }
+const webStore = name => ({ id: '', name, city: name, region: settings.zip === '32159' ? 'FL' : '', postalCode: settings.zip });
 function pickStore(s) {
   settings.store = s; saveSettings(); stockCache.clear();
   $('#storeResults').innerHTML = '';
@@ -1146,6 +1323,8 @@ async function loadModels() {
 let scanStream = null, scanLoop = null;
 async function openScanner() {
   $('#scanResult').innerHTML = '';
+  $('#tagResult').innerHTML = '';
+  lastLookup = null;
   $('#scanInput').value = '';
   $('#scanDlg').showModal();
   const video = $('#scanVideo');
@@ -1213,14 +1392,22 @@ async function lookupCode(code) {
   const box = $('#scanResult');
   box.innerHTML = '<div class="status"><span class="spinner"></span>Looking up…</div>';
   try {
-    let p = code.length >= 11 ? await Inventory.upc(code) : null;
-    if (!p) p = await Inventory.details(code);
+    const p = await Inventory.lookup(code);
     if (!p) { box.innerHTML = '<p class="muted">No product found for that code.</p>'; return; }
-    try { p.stock = await stockFor(p.sku); } catch (e) { p.stock = { status: 'unk', label: 'Stock unknown' }; }
+    if (p.web) p.stock = StockBook.stock(p);
+    else try { p.stock = await stockFor(p.sku); } catch (e) { p.stock = { status: 'unk', label: 'Stock unknown' }; }
     box.innerHTML = '';
-    const card = productCard(slimProduct(p));
+    lastLookup = slimProduct(p);
+    const card = productCard(lastLookup);
     card.style.flex = 'none';
     box.appendChild(card);
+    if (p.web) {
+      const hold = document.createElement('button');
+      hold.textContent = '✓ It\'s here on the floor — mark in stock';
+      hold.style.marginTop = '8px'; hold.style.width = '100%';
+      hold.onclick = () => { StockBook.mark(p, 'in', 'scan'); refreshStockBadges(); toast('Marked in stock'); };
+      box.appendChild(hold);
+    }
     if (p.stock.nearby?.length) {
       const n = document.createElement('p');
       n.className = 'muted'; n.textContent = 'In stock at: ' + p.stock.nearby.slice(0, 5).join(', ');
@@ -1228,9 +1415,63 @@ async function lookupCode(code) {
     }
     const ask = document.createElement('button');
     ask.className = 'primary'; ask.textContent = 'Ask AI about this'; ask.style.marginTop = '8px';
-    ask.onclick = () => { $('#scanDlg').close(); send(`Customer is looking at SKU ${p.sku} (${p.name}). Give me key selling points, who it's for, a better/cheaper in-stock alternative if there is one, and what to pair with it.`); };
+    ask.onclick = () => { $('#scanDlg').close(); send(`Customer is looking at ${idLabel(p) || ''} (${p.name}). Give me key selling points, who it's for, a better/cheaper in-stock alternative if there is one, and what to pair with it.`); };
     box.appendChild(ask);
   } catch (e) { box.innerHTML = `<p style="color:var(--bad)">${esc(e.message)}</p>`; }
+}
+
+// ---------- shelf-tag reader ----------
+async function readTags(file) {
+  const box = $('#tagResult');
+  box.innerHTML = '<div class="status"><span class="spinner"></span>Reading tags…</div>';
+  try {
+    const img = await loadImage(file);
+    const items = await Web.readTags({ mimeType: 'image/jpeg', data: resize(img, 1600, 0.85).split(',')[1] });
+    if (!items.length) { box.innerHTML = '<p class="muted">Couldn\'t read any products — try a closer, straighter photo.</p>'; return; }
+    box.innerHTML = '<p class="muted">Found these — uncheck anything that\'s wrong:</p>';
+    items.forEach((p, i) => {
+      const d = document.createElement('label');
+      d.className = 'tag-item';
+      d.innerHTML = `<input type="checkbox" checked data-i="${i}"><span>${esc(p.name)}<br><span class="muted">${esc([idLabel(p), p.price && money(p.price)].filter(Boolean).join(' · '))}</span></span>`;
+      box.appendChild(d);
+    });
+    const b = document.createElement('button');
+    b.className = 'primary'; b.textContent = 'Mark checked items in stock';
+    b.onclick = () => {
+      const chosen = [...box.querySelectorAll('input[data-i]:checked')].map(c => items[c.dataset.i]);
+      chosen.forEach(p => StockBook.mark(p, 'in', 'tag photo'));
+      box.innerHTML = `<p class="muted">✓ Added ${chosen.length} item${chosen.length === 1 ? '' : 's'} to the stock notebook.</p>`;
+      refreshStockBadges();
+    };
+    box.appendChild(b);
+  } catch (e) { box.innerHTML = `<p style="color:var(--bad)">${esc(e.message)}</p>`; }
+}
+
+// ---------- stock notebook screen ----------
+function renderBook() {
+  const q = normId($('#bookFilter').value);
+  const box = $('#bookList');
+  const list = StockBook.items.filter(e => !q || normId(e.name + e.model + e.sku).includes(q));
+  box.innerHTML = list.length ? '' : '<p class="muted">Nothing yet. Tap ✓ In / ✗ Out on product cards, scan a barcode, or read shelf tags.</p>';
+  list.slice(0, 300).forEach(e => {
+    const st = StockBook.stock(e);
+    const d = document.createElement('div');
+    d.className = 'book-item';
+    d.innerHTML = `<div class="b-main"><div>${esc(e.name || e.model || e.sku)}</div>
+      <div class="muted">${esc([e.sku ? 'SKU ' + e.sku : '', e.model ? 'Model ' + e.model : ''].filter(Boolean).join(' · '))}</div>
+      <span class="stock ${st.status}">${esc(st.label)}</span></div>
+      <button data-st="in">✓</button><button data-st="low">Low</button><button data-st="out">✗</button><button data-del class="danger">🗑</button>`;
+    d.querySelectorAll('[data-st]').forEach(b => { b.onclick = () => { StockBook.mark(e, b.dataset.st); renderBook(); refreshStockBadges(); }; });
+    $('[data-del]', d).onclick = () => { StockBook.remove(e.id); renderBook(); refreshStockBadges(); };
+    box.appendChild(d);
+  });
+}
+function openBook() {
+  document.querySelectorAll('dialog[open]').forEach(d => d.close());
+  closeDrawers();
+  $('#bookFilter').value = '';
+  renderBook();
+  $('#bookDlg').showModal();
 }
 
 // ---------- quick prompts ----------
@@ -1314,6 +1555,11 @@ function init() {
   bind('#setGemini', 'geminiKey', v => v.trim());
   bind('#setModel', 'model', v => v.trim() || DEFAULTS.model);
   bind('#setBB', 'bbKey', v => v.trim());
+  $('#setBB').addEventListener('change', () => {
+    stockCache.clear();
+    if (!settings.bbKey && !settings.store) pickStore(webStore('Lady Lake'));
+    if (!current.messages.length) renderWelcome();
+  });
   bind('#setDemo', 'demo');
   bind('#setZip', 'zip', v => v.trim());
   bind('#setRadius', 'radius', v => Math.max(5, Number(v) || 25));
@@ -1323,7 +1569,7 @@ function init() {
   $('#setDemo').addEventListener('change', () => {
     stockCache.clear();
     if (settings.demo && !settings.store) pickStore(Demo.STORE);
-    if (!settings.demo && settings.store?.id === Demo.STORE.id) { settings.store = null; saveSettings(); showCurrentStore(); renderHeader(); }
+    if (!settings.demo && settings.store?.id === Demo.STORE.id) { settings.store = source() === 'web' ? webStore('Lady Lake') : null; saveSettings(); showCurrentStore(); renderHeader(); }
   });
   $('#settingsDlg').addEventListener('close', () => { renderHeader(); if (!current.messages.length) renderWelcome(); });
   $('#btnFindStores').onclick = findStores;
@@ -1333,11 +1579,23 @@ function init() {
     localStorage.clear(); location.reload();
   };
 
+  // Buttons added inside dialogs (cards, notebook rows…) must not close the dialog; only value="close" buttons do.
+  document.querySelectorAll('dialog form').forEach(f => f.addEventListener('submit', e => { if (!e.submitter?.value) e.preventDefault(); }));
   $('#btnScan').onclick = openScanner;
+  $('#btnTags').onclick = () => $('#tagInput').click();
+  $('#tagInput').onchange = e => { const f = e.target.files[0]; e.target.value = ''; if (f) { stopScanner(); readTags(f); } };
+  $('#btnOpenBook').onclick = openBook;
+  $('#btnBook').onclick = openBook;
+  $('#bookFilter').oninput = renderBook;
+  $('#btnBookPrune').onclick = () => {
+    StockBook.items = StockBook.items.filter(e => Date.now() - e.at <= STOCK_FRESH_MS);
+    StockBook.save(); renderBook(); refreshStockBadges();
+  };
   $('#scanDlg').addEventListener('close', stopScanner);
   $('#btnScanLookup').onclick = () => lookupCode($('#scanInput').value);
   $('#scanInput').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); lookupCode(e.target.value); } });
 
+  if (!settings.store && source() === 'web') { settings.store = webStore('Lady Lake'); saveSettings(); }
   if (window.visualViewport) { visualViewport.addEventListener('resize', fitViewport); fitViewport(); }
   if (IS_IOS && !IS_STANDALONE && !LS.get('fa.iosTip', false)) {
     LS.set('fa.iosTip', true);
